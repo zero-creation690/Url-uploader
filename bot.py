@@ -1,5 +1,9 @@
 import os
 import asyncio
+import subprocess
+import json
+import math # Added for math.ceil used in metadata extraction
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import FloodWait, MessageNotModified
@@ -12,6 +16,64 @@ from helpers import (
     validate_file_size, get_file_extension
 )
 import time
+
+# --- NEW FUNCTIONS TO FIX ASPECT RATIO (REQUIRES FFPROBE/FFMPEG ON SERVER) ---
+
+def is_video_file(filepath):
+    """Checks if a file has a common video extension."""
+    video_extensions = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.ts']
+    ext = os.path.splitext(filepath)[1].lower()
+    return ext in video_extensions
+
+async def get_video_metadata(filepath):
+    """
+    Extracts video metadata (width, height, duration) using ffprobe.
+    Returns a dictionary (width, height, duration) or None on failure.
+    """
+    cmd = [
+        'ffprobe',
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height:format=duration',
+        '-of', 'json',
+        filepath
+    ]
+    
+    metadata = {}
+    
+    try:
+        # Run ffprobe synchronously in a thread (to avoid blocking the event loop)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, 
+            lambda: subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+        )
+        
+        data = json.loads(result.stdout)
+        
+        # Get duration from format block
+        duration_str = data.get('format', {}).get('duration')
+        if duration_str:
+            metadata['duration'] = math.ceil(float(duration_str))
+        
+        # Get width/height from stream block
+        if 'streams' in data and len(data['streams']) > 0:
+            stream = data['streams'][0]
+            metadata['width'] = stream.get('width')
+            metadata['height'] = stream.get('height')
+            
+        return metadata if metadata.get('width') and metadata.get('height') else None
+        
+    except subprocess.CalledProcessError as e:
+        print(f"FFprobe error on {filepath}: {e.stderr}")
+    except FileNotFoundError:
+        print("FFprobe not found. Please ensure FFmpeg/FFprobe is installed.")
+    except Exception as e:
+        print(f"Error extracting metadata: {str(e)}")
+        
+    return None
+
+# --- END FFPROBE FUNCTIONS ---
 
 # Initialize bot
 app = Client(
@@ -46,13 +108,7 @@ async def start_command(client, message: Message):
         "• Upload files up to 4GB to Telegram\n"
         "• Real-time progress with speed and ETA\n\n"
         "**How to use:**\n"
-        "Just send me any URL and I'll download and upload it for you!\n\n"
-        "**Commands:**\n"
-        "/help - Show help message\n"
-        "/about - About this bot\n"
-        "/settings - Configure caption, filename, thumbnail\n"
-        "/status - Check your stats\n\n"
-        "Send a URL to get started! 🚀"
+        "Just send me any URL and I'll download and upload it for you! 🚀"
     )
     
     keyboard = InlineKeyboardMarkup([
@@ -116,7 +172,8 @@ async def about_command(client, message: Message):
         "• yt-dlp - Video downloads\n"
         "• libtorrent - Torrent support\n"
         "• aiohttp - HTTP downloads\n"
-        "• MongoDB - Data storage\n\n"
+        "• MongoDB - Data storage\n"
+        "• **FFmpeg/FFprobe - Video metadata (New!)**\n\n"
         "Made with ❤️ for the community!"
     )
     await message.reply_text(text)
@@ -329,7 +386,8 @@ async def handle_url(client, message: Message):
     # Mark download as active
     active_downloads[user_id] = {
         'cancelled': False,
-        'status_msg': status_msg
+        'status_msg': status_msg,
+        'video_metadata': None # Added field to store metadata
     }
     
     filepath = None
@@ -374,6 +432,16 @@ async def handle_url(client, message: Message):
             await status_msg.edit_text(f"❌ **Error:** {msg}")
             downloader.cleanup(filepath)
             return
+            
+        # --- NEW METADATA EXTRACTION ---
+        if is_video_file(filepath):
+            video_metadata = await get_video_metadata(filepath)
+            if video_metadata:
+                active_downloads[user_id]['video_metadata'] = video_metadata
+            else:
+                # If metadata extraction fails, we still allow upload but warn
+                print(f"Warning: Could not extract metadata for {filepath}")
+        # --- END NEW METADATA EXTRACTION ---
         
         # Update stats
         await db.update_stats(user_id, download=True)
@@ -423,6 +491,10 @@ async def handle_url(client, message: Message):
     except Exception as e:
         await status_msg.edit_text(f"❌ **Error:** {str(e)}")
         await db.log_action(user_id, "error", str(e))
+    finally:
+        # Clean up active_downloads if an error occurred before the callback stage
+        if filepath and user_id in active_downloads and 'filepath' not in active_downloads[user_id]:
+             del active_downloads[user_id]
     
 # Callback query handler
 @app.on_callback_query()
@@ -448,6 +520,7 @@ async def callback_handler(client, callback_query):
         caption = info['caption']
         thumbnail = info['thumbnail']
         status_msg = info['status_msg']
+        video_metadata = info.get('video_metadata') # Retrieve metadata
         
         upload_progress = Progress(client, status_msg)
         
@@ -462,15 +535,34 @@ async def callback_handler(client, callback_query):
                     progress_args=("Uploading",)
                 )
             else:
+                # --- MODIFIED send_video CALL ---
+                
+                # Default values for video upload
+                width = None
+                height = None
+                duration = None
+                
+                # Use extracted metadata if available
+                if video_metadata:
+                    width = video_metadata.get('width')
+                    height = video_metadata.get('height')
+                    duration = video_metadata.get('duration')
+                
                 await client.send_video(
                     chat_id=callback_query.message.chat.id,
                     video=filepath,
                     caption=caption,
                     thumb=thumbnail,
+                    # Pass the extracted metadata to prevent ratio distortion
+                    width=width,
+                    height=height,
+                    duration=duration,
                     progress=upload_progress.progress_callback,
                     progress_args=("Uploading",),
                     supports_streaming=True
                 )
+                # --- END MODIFIED send_video CALL ---
+
             
             # Update stats
             await db.update_stats(uid, upload=True)
