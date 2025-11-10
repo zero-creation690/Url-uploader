@@ -1,99 +1,13 @@
 import os
 import asyncio
-import subprocess
-import json
-import math
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from pyrogram.errors import FloodWait, MessageNotModified
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from pyrogram.enums import ParseMode
 from config import Config
 from database import db
 from downloader import downloader
-from helpers import (
-    humanbytes, is_url, is_magnet_link, is_torrent_file,
-    Progress, TorrentProgress, sanitize_filename, 
-    validate_file_size, get_file_extension
-)
+from helpers import Progress, humanbytes, is_url
 import time
-
-# --- MODIFIED FUNCTIONS TO FIX AUDIO AND ASPECT RATIO ---
-
-def is_video_file(filepath):
-    """Checks if a file has a common video extension."""
-    video_extensions = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.ts']
-    ext = os.path.splitext(filepath)[1].lower()
-    return ext in video_extensions
-
-async def get_video_metadata(filepath):
-    """
-    Extracts comprehensive video metadata (width, height, duration, bitrate, etc.)
-    using ffprobe to ensure sound and ratio integrity.
-    """
-    cmd = [
-        'ffprobe',
-        '-v', 'error',
-        '-show_entries', 
-        'stream=width,height,codec_name:format=duration,bit_rate',
-        '-of', 'json',
-        filepath
-    ]
-    
-    metadata = {
-        'width': None,
-        'height': None,
-        'duration': None,
-        'bitrate': None,
-        'mime_type': 'video/mp4' # Default MIME type
-    }
-    
-    try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None, 
-            lambda: subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
-        )
-        
-        data = json.loads(result.stdout)
-        
-        # Get duration and overall bitrate from format block
-        format_data = data.get('format', {})
-        duration_str = format_data.get('duration')
-        if duration_str:
-            metadata['duration'] = math.ceil(float(duration_str))
-        
-        bitrate_str = format_data.get('bit_rate')
-        if bitrate_str:
-            metadata['bitrate'] = int(bitrate_str)
-            
-        # Get width/height from stream block
-        if 'streams' in data and len(data['streams']) > 0:
-            video_stream = next((s for s in data['streams'] if s.get('codec_type') == 'video'), None)
-            
-            if video_stream:
-                metadata['width'] = video_stream.get('width')
-                metadata['height'] = video_stream.get('height')
-                
-                # Update MIME type based on codec/extension if needed
-                ext = os.path.splitext(filepath)[1].lower()
-                if ext == '.mkv':
-                    metadata['mime_type'] = 'video/x-matroska'
-                elif ext == '.webm':
-                    metadata['mime_type'] = 'video/webm'
-                # mp4 is the default
-                
-        return metadata if metadata.get('width') and metadata.get('height') else None
-        
-    except subprocess.CalledProcessError as e:
-        print(f"FFprobe error on {filepath}: {e.stderr}")
-    except FileNotFoundError:
-        print("FFprobe not found. Please ensure FFmpeg/FFprobe is installed.")
-    except Exception as e:
-        print(f"Error extracting metadata: {str(e)}")
-        
-    return None
-
-# --- END MODIFIED FFPROBE FUNCTIONS ---
-
 
 # Initialize bot
 app = Client(
@@ -103,100 +17,348 @@ app = Client(
     bot_token=Config.BOT_TOKEN
 )
 
-# User settings storage (in memory)
+# User settings and tasks storage
 user_settings = {}
+user_tasks = {}
 
-# Active downloads tracker
-active_downloads = {}
-
-# Start command
-@app.on_message(filters.command("start"))
+# Start command with inline menu
+@app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     
     await db.add_user(user_id, username, first_name)
-    await db.log_action(user_id, "start", "User started the bot")
     
-    text = (
-        f"👋 **Welcome {first_name}!**\n\n"
-        "I'm a powerful URL uploader bot that can:\n"
-        "• Download files from any URL\n"
-        "• Download videos from YouTube, Instagram, TikTok, etc.\n"
-        "• Support torrents (magnet links & .torrent files)\n"
-        "• Upload files up to 4GB to Telegram\n"
-        "• Real-time progress with speed and ETA\n\n"
-        "**How to use:**\n"
-        "Just send me any URL and I'll download and upload it for you! 🚀"
-    )
+    text = f"""👋 Hi {first_name}!
+
+I'm **URL Uploader X bot**. Just send me any Direct download link and I'll upload file remotely to Telegram.
+
+**Supported:**
+• Direct HTTP/HTTPS links
+• YouTube, Instagram, TikTok videos
+• Torrent files and magnet links
+• Files up to 4GB
+
+**Developer:** {Config.DEVELOPER}
+**Updates:** {Config.UPDATE_CHANNEL}"""
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📚 Help", callback_data="help"),
-         InlineKeyboardButton("ℹ️ About", callback_data="about")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
+        [InlineKeyboardButton("⚙️ Go to Settings", callback_data="settings")],
+        [InlineKeyboardButton("📊 Plan details", callback_data="plan"),
+         InlineKeyboardButton("❓ Help", callback_data="help")]
     ])
     
     await message.reply_text(text, reply_markup=keyboard)
 
-# Help command
-@app.on_message(filters.command("help"))
-async def help_command(client, message: Message):
-    text = (
-        "📚 **Help & Usage**\n\n"
-        "**Basic Usage:**\n"
-        "• Send any HTTP/HTTPS URL to download\n"
-        "• Send YouTube, Instagram, TikTok URLs\n"
-        "• Send magnet links (magnet:?...)\n"
-        "• Send .torrent file links\n"
-        "• I'll download and upload to Telegram\n\n"
-        "**Settings:**\n"
-        "Use /settings to customize:\n"
-        "• Custom filename\n"
-        "• Custom caption\n"
-        "• Custom thumbnail (send photo)\n\n"
-        "**Commands:**\n"
-        "/start - Start the bot\n"
-        "/help - This message\n"
-        "/about - About the bot\n"
-        "/settings - Configure settings\n"
-        "/status - Your download stats\n"
-        "/cancel - Cancel active download\n"
-        "/total - Bot statistics (owner only)\n"
-        "/broadcast - Broadcast message (owner only)\n\n"
-        "**Limits:**\n"
-        "• Max file size: 4GB\n"
-        "• Speed: 10 MB/s\n"
-        "• Format: Any file type supported"
-    )
-    await message.reply_text(text)
+# Settings menu
+@app.on_callback_query(filters.regex("^settings$"))
+async def settings_menu(client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    settings = user_settings.get(user_id, {})
+    
+    text = "⚙️ **Here you can change bot settings**"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🖼️ Set thumbnail", callback_data="set_thumb")],
+        [InlineKeyboardButton("📝 Set default caption", callback_data="set_caption")],
+        [InlineKeyboardButton("✏️ Show rename option: ON", callback_data="rename_toggle")],
+        [InlineKeyboardButton("📁 Upload as Document: OFF", callback_data="doc_toggle")],
+        [InlineKeyboardButton("🎥 Upload as Video: ON", callback_data="video_toggle")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
 
-# About command
-@app.on_message(filters.command("about"))
-async def about_command(client, message: Message):
-    text = (
-        "ℹ️ **About URL Uploader Bot**\n\n"
-        "**Version:** 2.0\n"
-        "**Developer:** @YourUsername\n\n"
-        "**Features:**\n"
-        "✅ Direct URL downloads\n"
-        "✅ YouTube video downloads\n"
-        "✅ Instagram, TikTok support\n"
-        "✅ Torrent downloads (magnet links)\n"
-        "✅ Real-time progress tracking\n"
-        "✅ Custom thumbnails & captions\n"
-        "✅ Speed limiting (10 MB/s)\n"
-        "✅ Up to 4GB file support\n\n"
-        "**Technology:**\n"
-        "• Pyrogram - Telegram API\n"
-        "• yt-dlp - Video downloads\n"
-        "• libtorrent - Torrent support\n"
-        "• aiohttp - HTTP downloads\n"
-        "• MongoDB - Data storage\n"
-        "• **FFmpeg/FFprobe - Video metadata (Fixed Audio/Ratio!)**\n\n"
-        "Made with ❤️ for the community!"
-    )
-    await message.reply_text(text)
+# Plan details
+@app.on_callback_query(filters.regex("^plan$"))
+async def plan_details(client, callback: CallbackQuery):
+    text = """⏳ **Plan details**
+
+**Current Plan:** Free Plan
+**Max file size:** 4 GB
+**Download speed:** 200 MB/s
+**Torrent support:** ✅ Enabled
+**Auto-rename:** ✅ Enabled
+
+**Features:**
+✅ Direct download links
+✅ YouTube, Instagram downloads
+✅ Torrent & magnet links
+✅ Custom thumbnails
+✅ Custom captions
+✅ Batch downloads"""
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+# Help menu
+@app.on_callback_query(filters.regex("^help$"))
+async def help_menu(client, callback: CallbackQuery):
+    text = """📚 **Help me to learn bot**
+
+**How to use:**
+1️⃣ Send any URL, torrent file or magnet link
+2️⃣ Bot will download it
+3️⃣ Choose upload type (Document/Video)
+4️⃣ Rename if needed
+5️⃣ File uploaded!
+
+**Commands:**
+/start - Start bot
+/rename - Rename file
+/set_caption - Set caption
+/set_thumb - Set thumbnail
+/delete_thumb - Delete thumbnail
+
+**Supported links:**
+• Direct downloads (HTTP/HTTPS)
+• YouTube videos
+• Instagram posts/reels
+• TikTok videos
+• Torrent files (.torrent)
+• Magnet links
+
+**Speed:** 200 MB/s blazing fast! 🚀"""
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+# Back to start
+@app.on_callback_query(filters.regex("^back_start$"))
+async def back_start(client, callback: CallbackQuery):
+    await start_command(client, callback.message)
+
+# Handle file upload type selection
+@app.on_callback_query(filters.regex("^upload_"))
+async def handle_upload_type(client, callback: CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
+    
+    if user_id not in user_tasks:
+        await callback.answer("Task expired! Send URL again.", show_alert=True)
+        return
+    
+    task = user_tasks[user_id]
+    filepath = task['filepath']
+    upload_type = data.split('_')[1]  # doc or video
+    
+    await callback.message.edit_text("⬆️ **Uploading to Telegram...**")
+    
+    try:
+        # Get user settings
+        settings = user_settings.get(user_id, {})
+        thumbnail = settings.get('thumbnail')
+        caption = settings.get('caption', f"📁 **File:** {os.path.basename(filepath)}\n💾 **Size:** {humanbytes(os.path.getsize(filepath))}\n\n**Uploaded by:** {Config.DEVELOPER}")
+        
+        # Progress tracker
+        progress = Progress(client, callback.message)
+        
+        if upload_type == 'doc':
+            # Upload as document
+            await client.send_document(
+                chat_id=callback.message.chat.id,
+                document=filepath,
+                caption=caption,
+                thumb=thumbnail,
+                progress=progress.progress_callback,
+                progress_args=("Uploading",)
+            )
+        else:
+            # Upload as video
+            await client.send_video(
+                chat_id=callback.message.chat.id,
+                video=filepath,
+                caption=caption,
+                thumb=thumbnail,
+                supports_streaming=True,
+                progress=progress.progress_callback,
+                progress_args=("Uploading",)
+            )
+        
+        # Update stats
+        await db.update_stats(user_id, upload=True)
+        await db.log_action(user_id, "upload", filepath)
+        
+        # Delete status message
+        await callback.message.delete()
+        
+        # Send completion message
+        await callback.message.reply_text(
+            "✅ **Upload complete!**\n\nYou can send new task now",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
+            ])
+        )
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ **Upload failed:** {str(e)}")
+    
+    finally:
+        # Cleanup
+        downloader.cleanup(filepath)
+        if user_id in user_tasks:
+            del user_tasks[user_id]
+
+# Handle rename
+@app.on_callback_query(filters.regex("^rename_"))
+async def handle_rename(client, callback: CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
+    
+    if data == "rename_now":
+        await callback.message.edit_text(
+            "📝 **Send new name for this file** - 📁 " + 
+            os.path.basename(user_tasks[user_id]['filepath'])
+        )
+        user_tasks[user_id]['waiting_rename'] = True
+    elif data == "rename_skip":
+        # Show upload options
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📁 Upload as Document", callback_data="upload_doc")],
+            [InlineKeyboardButton("🎥 Upload as Video", callback_data="upload_video")]
+        ])
+        await callback.message.edit_text(
+            "**Choose upload type:**",
+            reply_markup=keyboard
+        )
+
+# Main URL/Torrent handler
+@app.on_message((filters.text | filters.document) & filters.private)
+async def handle_download(client, message: Message):
+    user_id = message.from_user.id
+    
+    # Check if it's a torrent file
+    if message.document and message.document.file_name.endswith('.torrent'):
+        torrent_path = await message.download()
+        url = torrent_path
+    elif message.text:
+        url = message.text.strip()
+        if not is_url(url) and not url.startswith('magnet:'):
+            return
+    else:
+        return
+    
+    await db.add_user(user_id, message.from_user.username, message.from_user.first_name)
+    
+    # Initial message
+    status_msg = await message.reply_text("🔄 **Processing your request...**")
+    
+    try:
+        # Download file
+        progress = Progress(client, status_msg)
+        filepath, error = await downloader.download(url, progress_callback=progress.progress_callback)
+        
+        if error:
+            await status_msg.edit_text(f"❌ **Error:** {error}")
+            return
+        
+        # Update stats
+        await db.update_stats(user_id, download=True)
+        await db.log_action(user_id, "download", url)
+        
+        # Store task for user
+        user_tasks[user_id] = {
+            'filepath': filepath,
+            'url': url if isinstance(url, str) else 'torrent'
+        }
+        
+        # Ask for rename
+        file_size = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
+        filename = os.path.basename(filepath)
+        
+        text = (
+            f"✅ **Download Complete!**\n\n"
+            f"📁 **File:** `{filename}`\n"
+            f"💾 **Size:** {humanbytes(file_size)}\n\n"
+            f"**Send new name for this file** - 📁 {filename}"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Rename now", callback_data="rename_now")],
+            [InlineKeyboardButton("⏭️ Skip", callback_data="rename_skip")]
+        ])
+        
+        await status_msg.edit_text(text, reply_markup=keyboard)
+        
+        # Log to channel
+        try:
+            await client.send_message(
+                Config.LOG_CHANNEL,
+                f"📥 **New Download**\n\n"
+                f"**User:** {message.from_user.mention}\n"
+                f"**File:** {filename}\n"
+                f"**Size:** {humanbytes(file_size)}\n"
+                f"**Source:** `{url if isinstance(url, str) else 'Torrent file'}`"
+            )
+        except Exception:
+            pass
+            
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+        await db.log_action(user_id, "error", str(e))
+
+# Handle rename input
+@app.on_message(filters.text & filters.private)
+async def handle_rename_input(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id in user_tasks and user_tasks[user_id].get('waiting_rename'):
+        new_name = message.text.strip()
+        filepath = user_tasks[user_id]['filepath']
+        
+        # Rename file
+        new_path = os.path.join(os.path.dirname(filepath), new_name)
+        os.rename(filepath, new_path)
+        user_tasks[user_id]['filepath'] = new_path
+        user_tasks[user_id]['waiting_rename'] = False
+        
+        # Show upload options
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📁 Upload as Document", callback_data="upload_doc")],
+            [InlineKeyboardButton("🎥 Upload as Video", callback_data="upload_video")]
+        ])
+        
+        await message.reply_text(
+            f"✅ **Renamed to:** `{new_name}`\n\n**Choose upload type:**",
+            reply_markup=keyboard
+        )
+
+# Handle thumbnail
+@app.on_message(filters.photo & filters.private)
+async def handle_thumbnail(client, message: Message):
+    user_id = message.from_user.id
+    
+    thumb_path = await message.download(file_name=f"{Config.DOWNLOAD_DIR}/thumb_{user_id}.jpg")
+    
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id]['thumbnail'] = thumb_path
+    
+    await message.reply_text("✅ **Thumbnail set successfully!**")
+
+# Set caption command
+@app.on_message(filters.command("set_caption"))
+async def set_caption_cmd(client, message: Message):
+    user_id = message.from_user.id
+    
+    if len(message.command) < 2:
+        await message.reply_text("Usage: `/set_caption Your caption here`")
+        return
+    
+    caption = message.text.split(None, 1)[1]
+    
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id]['caption'] = caption
+    
+    await message.reply_text("✅ **Default caption set!**")
 
 # Status command
 @app.on_message(filters.command("status"))
@@ -209,43 +371,12 @@ async def status_command(client, message: Message):
             "📊 **Your Statistics**\n\n"
             f"**User ID:** `{user_id}`\n"
             f"**Username:** @{user_data.get('username', 'N/A')}\n"
-            f"**Joined:** {user_data.get('joined_date').strftime('%Y-%m-%d')}\n"
             f"**Total Downloads:** {user_data.get('total_downloads', 0)}\n"
             f"**Total Uploads:** {user_data.get('total_uploads', 0)}\n"
-            f"**Last Used:** {user_data.get('last_used').strftime('%Y-%m-%d %H:%M')}"
+            f"**Member since:** {user_data.get('joined_date').strftime('%Y-%m-%d')}"
         )
     else:
-        text = "No data found. Use the bot first!"
-    
-    await message.reply_text(text)
-
-# Cancel command
-@app.on_message(filters.command("cancel"))
-async def cancel_command(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id in active_downloads:
-        # Mark for cancellation
-        active_downloads[user_id]['cancelled'] = True
-        await message.reply_text("⏹️ Cancelling download...")
-    else:
-        await message.reply_text("❌ No active download to cancel!")
-
-# Total stats command (owner only)
-@app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
-async def total_command(client, message: Message):
-    stats = await db.get_stats()
-    
-    text = (
-        "📈 **Bot Statistics**\n\n"
-        f"**Total Users:** {stats['total_users']}\n"
-        f"**Total Downloads:** {stats['total_downloads']}\n"
-        f"**Total Uploads:** {stats['total_uploads']}\n"
-        f"**Active Downloads:** {len(active_downloads)}\n\n"
-        f"**Server Status:** ✅ Online\n"
-        f"**Speed Limit:** 10 MB/s\n"
-        f"**Max File Size:** 4 GB"
-    )
+        text = "No data found!"
     
     await message.reply_text(text)
 
@@ -253,7 +384,7 @@ async def total_command(client, message: Message):
 @app.on_message(filters.command("broadcast") & filters.user(Config.OWNER_ID))
 async def broadcast_command(client, message: Message):
     if not message.reply_to_message:
-        await message.reply_text("❌ Reply to a message to broadcast it!")
+        await message.reply_text("Reply to a message to broadcast!")
         return
     
     users = await db.get_all_users()
@@ -274,344 +405,13 @@ async def broadcast_command(client, message: Message):
     
     await status_msg.edit_text(
         f"✅ **Broadcast Complete**\n\n"
-        f"**Success:** {success}\n"
-        f"**Failed:** {failed}"
+        f"Success: {success}\n"
+        f"Failed: {failed}"
     )
-
-# Settings command
-@app.on_message(filters.command("settings"))
-async def settings_command(client, message: Message):
-    user_id = message.from_user.id
-    settings = user_settings.get(user_id, {})
-    
-    text = (
-        "⚙️ **Your Settings**\n\n"
-        f"**Custom Filename:** `{settings.get('filename', 'Not set')}`\n"
-        f"**Custom Caption:** `{settings.get('caption', 'Not set')}`\n"
-        f"**Thumbnail:** {'✅ Set' if settings.get('thumbnail') else '❌ Not set'}\n\n"
-        "**To configure:**\n"
-        "• `/setname <filename>` - Set custom filename\n"
-        "• `/setcaption <caption>` - Set custom caption\n"
-        "• Send a photo - Set thumbnail\n"
-        "• `/clearsettings` - Clear all settings"
-    )
-    
-    await message.reply_text(text)
-
-# Set filename
-@app.on_message(filters.command("setname"))
-async def set_filename(client, message: Message):
-    user_id = message.from_user.id
-    
-    if len(message.command) < 2:
-        await message.reply_text("❌ Usage: `/setname filename.ext`")
-        return
-    
-    filename = " ".join(message.command[1:])
-    filename = sanitize_filename(filename)
-    
-    if user_id not in user_settings:
-        user_settings[user_id] = {}
-    user_settings[user_id]['filename'] = filename
-    
-    await message.reply_text(f"✅ Filename set to: `{filename}`")
-
-# Set caption
-@app.on_message(filters.command("setcaption"))
-async def set_caption(client, message: Message):
-    user_id = message.from_user.id
-    
-    if len(message.command) < 2:
-        await message.reply_text("❌ Usage: `/setcaption Your caption here`")
-        return
-    
-    caption = message.text.split(None, 1)[1]
-    
-    if user_id not in user_settings:
-        user_settings[user_id] = {}
-    user_settings[user_id]['caption'] = caption
-    
-    await message.reply_text("✅ Caption set successfully!")
-
-# Clear settings
-@app.on_message(filters.command("clearsettings"))
-async def clear_settings(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id in user_settings:
-        # Clean up thumbnail file if exists
-        if 'thumbnail' in user_settings[user_id]:
-            thumb_path = user_settings[user_id]['thumbnail']
-            if os.path.exists(thumb_path):
-                try:
-                    os.remove(thumb_path)
-                except:
-                    pass
-        
-        user_settings[user_id] = {}
-    
-    await message.reply_text("✅ All settings cleared!")
-
-# Handle photo for thumbnail
-@app.on_message(filters.photo)
-async def handle_thumbnail(client, message: Message):
-    user_id = message.from_user.id
-    
-    try:
-        # Download photo as thumbnail
-        thumb_path = await message.download(
-            file_name=f"{Config.DOWNLOAD_DIR}/thumb_{user_id}.jpg"
-        )
-        
-        if user_id not in user_settings:
-            user_settings[user_id] = {}
-        
-        # Remove old thumbnail if exists
-        if 'thumbnail' in user_settings[user_id]:
-            old_thumb = user_settings[user_id]['thumbnail']
-            if os.path.exists(old_thumb):
-                try:
-                    os.remove(old_thumb)
-                except:
-                    pass
-        
-        user_settings[user_id]['thumbnail'] = thumb_path
-        await message.reply_text("✅ Thumbnail set successfully!")
-        
-    except Exception as e:
-        await message.reply_text(f"❌ Failed to set thumbnail: {str(e)}")
-
-# Main URL handler
-@app.on_message(filters.text & filters.private)
-async def handle_url(client, message: Message):
-    url = message.text.strip()
-    
-    # Check if it's a valid URL
-    if not is_url(url):
-        return
-    
-    user_id = message.from_user.id
-    
-    # Check if user already has active download
-    if user_id in active_downloads:
-        await message.reply_text("⚠️ You already have an active download! Use /cancel to stop it.")
-        return
-    
-    # Add user to database
-    await db.add_user(user_id, message.from_user.username, message.from_user.first_name)
-    
-    # Initial message
-    status_msg = await message.reply_text("🔄 **Processing your request...**")
-    
-    # Mark download as active
-    active_downloads[user_id] = {
-        'cancelled': False,
-        'status_msg': status_msg,
-        'video_metadata': None 
-    }
-    
-    filepath = None
-    
-    try:
-        # Determine download type and create appropriate progress tracker
-        is_torrent = is_magnet_link(url) or is_torrent_file(url)
-        
-        if is_torrent:
-            progress = TorrentProgress(client, status_msg)
-        else:
-            progress = Progress(client, status_msg)
-        
-        # Download file
-        filepath, error = await downloader.download(
-            url, 
-            progress_callback=progress.progress_callback
-        )
-        
-        # Check if cancelled
-        if active_downloads.get(user_id, {}).get('cancelled'):
-            if filepath and os.path.exists(filepath):
-                downloader.cleanup(filepath)
-            await status_msg.edit_text("⏹️ **Download cancelled!**")
-            return
-        
-        if error:
-            await status_msg.edit_text(f"❌ **Error:** {error}")
-            await db.log_action(user_id, "error", error)
-            return
-        
-        # Validate file
-        if not os.path.exists(filepath):
-            await status_msg.edit_text("❌ **Error:** File not found after download")
-            return
-        
-        # Check file size
-        file_size = os.path.getsize(filepath)
-        is_valid, msg = validate_file_size(file_size, Config.MAX_FILE_SIZE)
-        
-        if not is_valid:
-            await status_msg.edit_text(f"❌ **Error:** {msg}")
-            downloader.cleanup(filepath)
-            return
-            
-        # --- NEW METADATA EXTRACTION ---
-        if is_video_file(filepath):
-            video_metadata = await get_video_metadata(filepath)
-            if video_metadata:
-                active_downloads[user_id]['video_metadata'] = video_metadata
-            else:
-                print(f"Warning: Could not extract metadata for {filepath}. Upload might fail or be distorted.")
-        # --- END NEW METADATA EXTRACTION ---
-        
-        # Update stats
-        await db.update_stats(user_id, download=True)
-        await db.log_action(user_id, "download", url)
-        
-        # Get user settings
-        settings = user_settings.get(user_id, {})
-        custom_filename = settings.get('filename')
-        thumbnail = settings.get('thumbnail')
-        
-        # Prepare caption
-        filename_display = custom_filename or os.path.basename(filepath)
-        default_caption = (
-            f"📁 **File:** `{filename_display}`\n"
-            f"💾 **Size:** {humanbytes(file_size)}\n"
-            f"🔗 **Source:** Direct Download"
-        )
-        custom_caption = settings.get('caption', default_caption)
-        
-        # Rename if custom filename provided
-        if custom_filename:
-            new_path = os.path.join(Config.DOWNLOAD_DIR, custom_filename)
-            try:
-                os.rename(filepath, new_path)
-                filepath = new_path
-            except Exception as e:
-                pass
-        
-        # Ask user how to upload (Document or Video)
-        buttons = [
-            [InlineKeyboardButton("📄 Document", callback_data=f"upload_doc:{user_id}")],
-            [InlineKeyboardButton("🎬 Video", callback_data=f"upload_vid:{user_id}")]
-        ]
-        
-        await status_msg.edit_text(
-            "⚡ **Download complete!**\n\n"
-            "Choose how you want to upload the file:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        
-        # Store file info for callback
-        active_downloads[user_id]['filepath'] = filepath
-        active_downloads[user_id]['thumbnail'] = thumbnail
-        active_downloads[user_id]['caption'] = custom_caption
-        active_downloads[user_id]['status_msg'] = status_msg
-        
-    except Exception as e:
-        await status_msg.edit_text(f"❌ **Error:** {str(e)}")
-        await db.log_action(user_id, "error", str(e))
-    finally:
-        if filepath and user_id in active_downloads and 'filepath' not in active_downloads[user_id]:
-             del active_downloads[user_id]
-    
-# Callback query handler
-@app.on_callback_query()
-async def callback_handler(client, callback_query):
-    data = callback_query.data
-    
-    if data == "help":
-        await help_command(client, callback_query.message)
-    elif data == "about":
-        await about_command(client, callback_query.message)
-    elif data == "settings":
-        await settings_command(client, callback_query.message)
-    
-    # Handle upload choice
-    elif data.startswith("upload_doc:") or data.startswith("upload_vid:"):
-        uid = int(data.split(":")[1])
-        if uid not in active_downloads:
-            await callback_query.answer("❌ File not found or expired", show_alert=True)
-            return
-        
-        info = active_downloads[uid]
-        filepath = info['filepath']
-        caption = info['caption']
-        thumbnail = info['thumbnail']
-        status_msg = info['status_msg']
-        video_metadata = info.get('video_metadata')
-        
-        upload_progress = Progress(client, status_msg)
-        
-        try:
-            if data.startswith("upload_doc:"):
-                await client.send_document(
-                    chat_id=callback_query.message.chat.id,
-                    document=filepath,
-                    caption=caption,
-                    thumb=thumbnail,
-                    progress=upload_progress.progress_callback,
-                    progress_args=("Uploading",)
-                )
-            else:
-                # --- MODIFIED send_video CALL to pass ALL metadata ---
-                
-                # Default values
-                width = None
-                height = None
-                duration = None
-                bitrate = None
-                mime_type = None
-                
-                # Use extracted metadata if available
-                if video_metadata:
-                    width = video_metadata.get('width')
-                    height = video_metadata.get('height')
-                    duration = video_metadata.get('duration')
-                    bitrate = video_metadata.get('bitrate')
-                    mime_type = video_metadata.get('mime_type')
-
-                await client.send_video(
-                    chat_id=callback_query.message.chat.id,
-                    video=filepath,
-                    caption=caption,
-                    thumb=thumbnail,
-                    # Pass the extracted metadata to ensure correct encoding/processing
-                    width=width,
-                    height=height,
-                    duration=duration,
-                    mime_type=mime_type, # This helps Telegram identify the container correctly
-                    # bitrate=bitrate, # Pyrogram often calculates this, but providing others helps
-                    progress=upload_progress.progress_callback,
-                    progress_args=("Uploading",),
-                    supports_streaming=True
-                )
-                # --- END MODIFIED send_video CALL ---
-
-            
-            # Update stats
-            await db.update_stats(uid, upload=True)
-            await db.log_action(uid, "upload", filepath)
-            
-            await status_msg.delete()
-            await callback_query.message.delete()
-            
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Upload failed: {str(e)}\n\n*If the error persists, please try uploading as a Document instead.*")
-        
-        finally:
-            if os.path.exists(filepath):
-                downloader.cleanup(filepath)
-            del active_downloads[uid]
-        
-        await callback_query.answer("✅ Upload started!")
-    
-    else:
-        await callback_query.answer()
 
 # Run bot
 if __name__ == "__main__":
-    print("🤖 Bot starting...")
-    print(f"✅ Torrent support enabled")
-    print(f"✅ Video download support enabled")
-    print(f"✅ Progress tracking optimized")
+    print("🚀 URL Uploader X Bot starting...")
+    print(f"👨‍💻 Developer: {Config.DEVELOPER}")
+    print(f"📢 Updates: {Config.UPDATE_CHANNEL}")
     app.run()
