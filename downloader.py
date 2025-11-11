@@ -3,9 +3,8 @@ import aiohttp
 import asyncio
 import yt_dlp
 import libtorrent as lt
-import subprocess
 from config import Config
-from helpers import speed_limiter, sanitize_filename, is_video_file
+from helpers import sanitize_filename
 import time
 import shutil
 
@@ -75,42 +74,38 @@ class Downloader:
             return None, f"Download error: {str(e)}"
     
     async def download_ytdlp(self, url, progress_callback=None):
-        """Download using yt-dlp with best quality and original audio"""
+        """Download using yt-dlp with BEST quality - ORIGINAL file"""
         try:
             ydl_opts = {
                 'outtmpl': os.path.join(self.download_dir, '%(title)s.%(ext)s'),
-                # Best video + best audio, preserve original quality
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+                'format': 'bestvideo+bestaudio/best',
                 'merge_output_format': 'mp4',
                 'quiet': False,
                 'no_warnings': False,
-                'extract_flat': False,
-                'writethumbnail': True,
-                # Audio settings - keep original
-                'postprocessor_args': [
-                    '-c:v', 'copy',  # Copy video stream without re-encoding
-                    '-c:a', 'aac',   # Use AAC for audio (best compatibility)
-                    '-b:a', '320k',  # High quality audio bitrate
-                    '-ar', '48000',  # 48kHz sample rate
-                    '-ac', '2',      # Stereo audio
-                ],
-                'keepvideo': False,
-                'prefer_ffmpeg': True,
-                'postprocessors': [
-                    {
-                        'key': 'FFmpegVideoConvertor',
-                        'preferedformat': 'mp4',
-                    },
-                    {
-                        'key': 'FFmpegMetadata',
-                        'add_metadata': True,
-                    },
-                    {
-                        'key': 'EmbedThumbnail',
-                        'already_have_thumbnail': False,
-                    },
-                ],
+                'writethumbnail': False,
+                'no_post_overwrites': True,
             }
+            
+            loop = asyncio.get_event_loop()
+            
+            def download():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+                    base = os.path.splitext(filename)[0]
+                    if os.path.exists(f"{base}.mp4"):
+                        filename = f"{base}.mp4"
+                    return filename, info.get('title', 'Video')
+            
+            filepath, title = await loop.run_in_executor(None, download)
+            
+            if os.path.exists(filepath):
+                return filepath, None
+            else:
+                return None, "Failed to download video"
+                
+        except Exception as e:
+            return None, f"Download error: {str(e)}"
             
             loop = asyncio.get_event_loop()
             
