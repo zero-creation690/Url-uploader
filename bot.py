@@ -29,6 +29,9 @@ COOLDOWN_TIME = 159  # 2 minutes 39 seconds
 # Random emojis for reactions
 REACTION_EMOJIS = ["👍", "❤", "🔥", "🎉", "😍", "👏", "⚡", "✨", "💯", "🚀"]
 
+# Welcome image URL
+WELCOME_IMAGE = "https://ar-hosting.pages.dev/1762658234858.jpg"
+
 def format_time(seconds):
     """Format seconds to minutes and seconds"""
     minutes = seconds // 60
@@ -51,7 +54,7 @@ def get_remaining_time(user_id):
     
     return int(remaining)
 
-# Start command - Auto-filter style with random reaction
+# Start command - Auto-filter style with random reaction and image
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     user_id = message.from_user.id
@@ -73,16 +76,23 @@ async def start_command(client, message: Message):
         channel=Config.UPDATE_CHANNEL
     )
     
-    # Auto-filter style buttons
+    # Modified buttons - removed Settings and Status
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📚 Help", callback_data="help"),
          InlineKeyboardButton("ℹ️ About", callback_data="about")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-         InlineKeyboardButton("📊 Status", callback_data="status")],
         [InlineKeyboardButton("📢 Updates Channel", url=Config.UPDATE_CHANNEL)]
     ])
     
-    await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
+    # Send with photo
+    try:
+        await message.reply_photo(
+            photo=WELCOME_IMAGE,
+            caption=text,
+            reply_markup=keyboard
+        )
+    except:
+        # Fallback if image fails
+        await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
 
 # Help command - Shows everything in one message
 @app.on_callback_query(filters.regex("^help$"))
@@ -96,7 +106,7 @@ async def help_callback(client, callback: CallbackQuery):
         [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
     ])
     
-    await callback.message.edit_text(text, reply_markup=keyboard, disable_web_page_preview=True)
+    await callback.message.edit_caption(caption=text, reply_markup=keyboard)
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message: Message):
@@ -124,7 +134,7 @@ async def about_callback(client, callback: CallbackQuery):
         [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
     ])
     
-    await callback.message.edit_text(text, reply_markup=keyboard, disable_web_page_preview=True)
+    await callback.message.edit_caption(caption=text, reply_markup=keyboard)
 
 @app.on_message(filters.command("about") & filters.private)
 async def about_command(client, message: Message):
@@ -270,15 +280,14 @@ async def back_start(client, callback: CallbackQuery):
         channel=Config.UPDATE_CHANNEL
     )
     
+    # Modified buttons - removed Settings and Status
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📚 Help", callback_data="help"),
          InlineKeyboardButton("ℹ️ About", callback_data="about")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-         InlineKeyboardButton("📊 Status", callback_data="status")],
         [InlineKeyboardButton("📢 Updates Channel", url=Config.UPDATE_CHANNEL)]
     ])
     
-    await callback.message.edit_text(text, reply_markup=keyboard, disable_web_page_preview=True)
+    await callback.message.edit_caption(caption=text, reply_markup=keyboard)
 
 # Handle file upload type selection
 @app.on_callback_query(filters.regex("^upload_"))
@@ -365,21 +374,18 @@ async def handle_upload_type(client, callback: CallbackQuery):
         # Set cooldown after successful upload
         user_cooldowns[user_id] = time.time()
         
-        # Success message with cooldown
+        # Success message with cooldown - NO INLINE BUTTONS
         remaining = get_remaining_time(user_id)
         time_str = format_time(remaining)
         
-        await client.send_message(
+        success_msg = await client.send_message(
             callback.message.chat.id,
             f"✅ **Upload Complete!**\n\n"
-            f"You can send new task after {time_str}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Start", callback_data="back_start")]
-            ])
+            f"⏳ You can send new task after **{time_str}**"
         )
         
-        # Start cooldown notification task
-        asyncio.create_task(cooldown_notification(client, callback.message.chat.id, user_id))
+        # Start cooldown refresh task
+        asyncio.create_task(cooldown_refresh_message(client, success_msg, user_id))
         
         # Log to channel
         try:
@@ -402,23 +408,32 @@ async def handle_upload_type(client, callback: CallbackQuery):
         if user_id in user_tasks:
             del user_tasks[user_id]
 
-async def cooldown_notification(client, chat_id, user_id):
-    """Send notification when cooldown expires"""
-    remaining = get_remaining_time(user_id)
-    if remaining > 0:
-        await asyncio.sleep(remaining)
-    
-    # Check if cooldown is still active (user might have been removed)
-    if user_id in user_cooldowns:
-        del user_cooldowns[user_id]
-        
-        try:
-            await client.send_message(
-                chat_id,
-                "You can send new task now 🚀"
+async def cooldown_refresh_message(client, message, user_id):
+    """Refresh the cooldown message every 10 seconds"""
+    try:
+        while True:
+            remaining = get_remaining_time(user_id)
+            
+            if remaining <= 0:
+                # Cooldown finished
+                await message.edit_text(
+                    "✅ **Upload Complete!**\n\n"
+                    "🚀 **You can send new task now!**"
+                )
+                break
+            
+            # Update message with remaining time
+            time_str = format_time(remaining)
+            await message.edit_text(
+                f"✅ **Upload Complete!**\n\n"
+                f"⏳ You can send new task after **{time_str}**"
             )
-        except:
-            pass
+            
+            # Wait 10 seconds before next update
+            await asyncio.sleep(10)
+            
+    except Exception as e:
+        print(f"Error refreshing cooldown message: {e}")
 
 # Handle rename callback
 @app.on_callback_query(filters.regex("^rename_"))
@@ -517,8 +532,8 @@ async def handle_text_input(client, message: Message):
     if remaining > 0:
         time_str = format_time(remaining)
         await message.reply_text(
-            f"👆 See this message and wait till this time.\n\n"
-            f"⏳ You can send new task after {time_str}"
+            f"⏳ **Please wait!**\n\n"
+            f"You can send new task after **{time_str}**"
         )
         return
     
@@ -536,8 +551,8 @@ async def handle_document(client, message: Message):
     if remaining > 0:
         time_str = format_time(remaining)
         await message.reply_text(
-            f"👆 See this message and wait till this time.\n\n"
-            f"⏳ You can send new task after {time_str}"
+            f"⏳ **Please wait!**\n\n"
+            f"You can send new task after **{time_str}**"
         )
         return
     
