@@ -8,7 +8,6 @@ from database import db
 from downloader import downloader
 from helpers import Progress, humanbytes, is_url, is_magnet
 import time
-from datetime import datetime, timedelta
 
 # Initialize bot
 app = Client(
@@ -21,29 +20,6 @@ app = Client(
 # User settings and tasks storage
 user_settings = {}
 user_tasks = {}
-user_cooldown = {}  # Store cooldown timers
-COOLDOWN_TIME = 180  # 3 minutes in seconds (change this as needed)
-
-# Function to format time remaining
-def format_time(seconds):
-    minutes = seconds // 60
-    secs = seconds % 60
-    if minutes > 0:
-        return f"{minutes} minute{'s' if minutes > 1 else ''}, {secs} second{'s' if secs > 1 else ''}"
-    else:
-        return f"{secs} second{'s' if secs > 1 else ''}"
-
-# Function to check cooldown
-def check_cooldown(user_id):
-    if user_id not in user_cooldown:
-        return True, 0
-    
-    elapsed = time.time() - user_cooldown[user_id]
-    if elapsed >= COOLDOWN_TIME:
-        return True, 0
-    else:
-        remaining = COOLDOWN_TIME - int(elapsed)
-        return False, remaining
 
 # Start command - Auto-filter style
 @app.on_message(filters.command("start") & filters.private)
@@ -107,7 +83,6 @@ async def about_callback(client, callback: CallbackQuery):
     )
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✴️ Sources", url="https://github.com/zerodev6/URL-UPLOADER")],
         [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
     ])
     
@@ -121,13 +96,12 @@ async def about_command(client, message: Message):
     )
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✴️ Sources", url="https://github.com/zerodev6/URL-UPLOADER")],
         [InlineKeyboardButton("🔙 Back to Start", callback_data="back_start")]
     ])
     
     await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
 
-# Settings menu (Callback)
+# Settings menu
 @app.on_callback_query(filters.regex("^settings$"))
 async def settings_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -144,7 +118,8 @@ async def settings_callback(client, callback: CallbackQuery):
 📝 Send `/setname <filename>` - Set custom filename
 💬 Send `/setcaption <text>` - Set custom caption
 🖼️ Send a photo - Set as thumbnail
-🗑️ Send `/clearsettings` - Clear all settings""".format(
+🗑️ Send `/clearsettings` - Clear all settings
+👁️ Send `/showthumb` - View your thumbnail""".format(
         settings.get('filename', 'Not set'),
         'Set ✅' if settings.get('caption') else 'Not set',
         'Set ✅' if settings.get('thumbnail') else 'Not set'
@@ -156,7 +131,6 @@ async def settings_callback(client, callback: CallbackQuery):
     
     await callback.message.edit_text(text, reply_markup=keyboard)
 
-# Settings menu (Command) - Improved to include navigation button
 @app.on_message(filters.command("settings") & filters.private)
 async def settings_command(client, message: Message):
     user_id = message.from_user.id
@@ -173,19 +147,18 @@ async def settings_command(client, message: Message):
 📝 Send `/setname <filename>` - Set custom filename
 💬 Send `/setcaption <text>` - Set custom caption
 🖼️ Send a photo - Set as thumbnail
-🗑️ Send `/clearsettings` - Clear all settings""".format(
+🗑️ Send `/clearsettings` - Clear all settings
+👁️ Send `/showthumb` - View your thumbnail""".format(
         settings.get('filename', 'Not set'),
         'Set ✅' if settings.get('caption') else 'Not set',
         'Set ✅' if settings.get('thumbnail') else 'Not set'
     )
-
-    # Added keyboard for better UX consistency
+    
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Back to Start", callback_data="back_start")]
     ])
     
     await message.reply_text(text, reply_markup=keyboard)
-
 
 # Status command
 @app.on_callback_query(filters.regex("^status$"))
@@ -350,20 +323,14 @@ async def handle_upload_type(client, callback: CallbackQuery):
         
         await callback.message.delete()
         
-        # Set cooldown timer
-        user_cooldown[user_id] = time.time()
-        
-        # Success message with cooldown (NO BUTTONS)
-        cooldown_msg = await client.send_message(
+        # Success message
+        await client.send_message(
             callback.message.chat.id,
-            f"✅ **Upload Complete!**\n\nYou can send new task after **{format_time(COOLDOWN_TIME)}**"
+            "✅ **Upload Complete!**\n\nYou can send new task now 🚀",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to Start", callback_data="back_start")]
+            ])
         )
-        
-        # Store message ID for later update
-        user_tasks[user_id] = {'cooldown_msg_id': cooldown_msg.id}
-        
-        # Background task to update cooldown message
-        asyncio.create_task(update_cooldown_message(client, callback.message.chat.id, cooldown_msg.id, user_id, callback.from_user.mention))
         
         # Log to channel
         try:
@@ -383,49 +350,8 @@ async def handle_upload_type(client, callback: CallbackQuery):
     
     finally:
         downloader.cleanup(filepath)
-
-# Background task to update cooldown message
-async def update_cooldown_message(client, chat_id, msg_id, user_id, user_mention):
-    try:
-        while True:
-            can_use, remaining = check_cooldown(user_id)
-            
-            if can_use:
-                # Cooldown finished - Keep last message as is, send SEPARATE new message
-                # Send SEPARATE NEW message to notify user
-                await client.send_message(
-                    chat_id=chat_id,
-                    text="✅ **You can send new task now** 🚀"
-                )
-                
-                # Log to channel
-                try:
-                    await client.send_message(
-                        Config.LOG_CHANNEL,
-                        f"⏰ **Cooldown Finished**\n\n"
-                        f"👤 User: {user_mention}\n"
-                        f"✅ Can use bot again"
-                    )
-                except:
-                    pass
-                
-                # Clean up task
-                if user_id in user_tasks:
-                    del user_tasks[user_id]
-                break
-            else:
-                # Update remaining time (NO BUTTONS)
-                try:
-                    await client.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=f"✅ **Upload Complete!**\n\nYou can send new task after **{format_time(remaining)}**"
-                    )
-                except:
-                    pass
-                await asyncio.sleep(10)  # Update every 10 seconds
-    except Exception as e:
-        print(f"Error updating cooldown message: {e}")
+        if user_id in user_tasks:
+            del user_tasks[user_id]
 
 # Handle rename callback
 @app.on_callback_query(filters.regex("^rename_"))
@@ -466,14 +392,22 @@ async def handle_rename_callback(client, callback: CallbackQuery):
         await callback.answer()
 
 # Handle rename input first
-@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "broadcast"]))
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast"]))
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
+    
+    # Debug: Check if user has active task
+    print(f"[DEBUG] User {user_id} sent text: {message.text[:50]}")
+    print(f"[DEBUG] Active tasks: {user_id in user_tasks}")
+    if user_id in user_tasks:
+        print(f"[DEBUG] Waiting for rename: {user_tasks[user_id].get('waiting_rename', False)}")
     
     # Check if waiting for rename
     if user_id in user_tasks and user_tasks[user_id].get('waiting_rename'):
         new_name = message.text.strip()
         filepath = user_tasks[user_id]['filepath']
+        
+        print(f"[DEBUG] Renaming {filepath} to {new_name}")
         
         # Create new path with new name
         new_path = os.path.join(os.path.dirname(filepath), new_name)
@@ -484,6 +418,8 @@ async def handle_text_input(client, message: Message):
                 os.rename(filepath, new_path)
                 user_tasks[user_id]['filepath'] = new_path
                 user_tasks[user_id]['waiting_rename'] = False
+                
+                print(f"[DEBUG] Rename successful!")
                 
                 # Show upload options
                 keyboard = InlineKeyboardMarkup([
@@ -496,33 +432,20 @@ async def handle_text_input(client, message: Message):
                     reply_markup=keyboard
                 )
             else:
+                print(f"[DEBUG] File not found: {filepath}")
                 await message.reply_text("❌ **Error:** File not found!")
         except Exception as e:
+            print(f"[DEBUG] Rename error: {str(e)}")
             await message.reply_text(f"❌ **Rename failed:** {str(e)}")
-        return
-    
-    # Check cooldown before processing new download
-    can_use, remaining = check_cooldown(user_id)
-    if not can_use:
-        cooldown_msg = await message.reply_text(
-            f"⏳ **Please wait!**\n\nYou can send new task after **{format_time(remaining)}**"
-        )
-        
-        # Point to previous message if exists
-        if user_id in user_tasks and 'cooldown_msg_id' in user_tasks[user_id]:
-            await message.reply_text(
-                "👆 **See this message and wait til this time.**",
-                reply_to_message_id=user_tasks[user_id]['cooldown_msg_id']
-            )
-        else:
-            await message.reply_text("👆 **See this message and wait til this time.**")
         return
     
     # If not waiting for rename, check if it's a URL
     url = message.text.strip()
     if not (is_url(url) or is_magnet(url)):
+        print(f"[DEBUG] Not a valid URL, ignoring")
         return
     
+    print(f"[DEBUG] Processing as download URL")
     # Process as download
     await process_download(client, message, url)
 
@@ -530,20 +453,6 @@ async def handle_text_input(client, message: Message):
 @app.on_message(filters.document & filters.private)
 async def handle_document(client, message: Message):
     user_id = message.from_user.id
-    
-    # Check cooldown
-    can_use, remaining = check_cooldown(user_id)
-    if not can_use:
-        await message.reply_text(
-            f"⏳ **Please wait!**\n\nYou can send new task after **{format_time(remaining)}**"
-        )
-        
-        if user_id in user_tasks and 'cooldown_msg_id' in user_tasks[user_id]:
-            await message.reply_text(
-                "👆 **See this message and wait til this time.**",
-                reply_to_message_id=user_tasks[user_id]['cooldown_msg_id']
-            )
-        return
     
     # Check if it's a torrent file
     if message.document and message.document.file_name.endswith('.torrent'):
@@ -588,7 +497,7 @@ async def process_download(client, message: Message, url):
             f"📁 **File:** `{filename}`\n"
             f"💾 **Size:** {humanbytes(filesize)}\n"
             f"⚡ **Speed:** 500 MB/s\n\n"
-            f"📝 **Want to rename this file?**"
+            f"📝 **Send new name for this file** - 📁 `{filename}`"
         )
         
         keyboard = InlineKeyboardMarkup([
@@ -661,11 +570,13 @@ async def handle_thumbnail(client, message: Message):
         user_settings[user_id] = {}
     user_settings[user_id]['thumbnail'] = thumb_path
     
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Delete Thumbnail", callback_data="delete_thumb")]
+    ])
+    
     await message.reply_text(
         "✅ **Saved your thumbnail**",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🗑️ Delete Thumbnail", callback_data="delete_thumb")]
-        ])
+        reply_markup=keyboard
     )
 
 # Show thumbnail command
@@ -673,15 +584,18 @@ async def handle_thumbnail(client, message: Message):
 async def showthumb_command(client, message: Message):
     user_id = message.from_user.id
     settings = user_settings.get(user_id, {})
+    
     thumbnail = settings.get('thumbnail')
     
     if thumbnail and os.path.exists(thumbnail):
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Delete Thumbnail", callback_data="delete_thumb")]
+        ])
+        
         await message.reply_photo(
             photo=thumbnail,
-            caption="✅ **Your Current Thumbnail**",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑️ Delete Thumbnail", callback_data="delete_thumb")]
-            ])
+            caption="📸 **Your Current Thumbnail**",
+            reply_markup=keyboard
         )
     else:
         await message.reply_text(
@@ -694,21 +608,46 @@ async def showthumb_command(client, message: Message):
 async def delete_thumb_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
     settings = user_settings.get(user_id, {})
+    
     thumbnail = settings.get('thumbnail')
     
     if thumbnail and os.path.exists(thumbnail):
         try:
             os.remove(thumbnail)
-            if user_id in user_settings:
-                user_settings[user_id]['thumbnail'] = None
+            user_settings[user_id]['thumbnail'] = None
             await callback.message.edit_caption(
-                caption="🗑️ **Thumbnail deleted successfully!**"
+                caption="✅ **Thumbnail deleted successfully!**"
             )
-            await callback.answer("✅ Thumbnail deleted!", show_alert=True)
+            await callback.answer("Thumbnail deleted!", show_alert=True)
         except Exception as e:
-            await callback.answer(f"❌ Error: {str(e)}", show_alert=True)
+            await callback.answer(f"Error: {str(e)}", show_alert=True)
     else:
-        await callback.answer("❌ No thumbnail to delete!", show_alert=True)
+        await callback.answer("No thumbnail to delete!", show_alert=True)
+
+# Total stats command (owner only)
+@app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
+async def total_command(client, message: Message):
+    stats = await db.get_stats()
+    
+    text = f"""📈 **Bot Statistics**
+
+👥 **Users:**
+• Total Users: {stats['total_users']}
+
+📊 **Activity:**
+• Total Downloads: {stats['total_downloads']}
+• Total Uploads: {stats['total_uploads']}
+
+⚙️ **Bot Info:**
+• Speed: 500 MB/s
+• Max Size: 4 GB
+• Cooldown: {COOLDOWN_TIME} seconds ({format_time(COOLDOWN_TIME)})
+• Status: ✅ Online
+
+**Developer:** {Config.DEVELOPER}
+**Updates:** {Config.UPDATE_CHANNEL}"""
+    
+    await message.reply_text(text)
 
 # Broadcast (owner only)
 @app.on_message(filters.command("broadcast") & filters.user(Config.OWNER_ID))
@@ -737,31 +676,6 @@ async def broadcast_command(client, message: Message):
         f"Success: {success}\nFailed: {failed}"
     )
 
-# Total users command (owner only)
-@app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
-async def total_command(client, message: Message):
-    try:
-        users = await db.get_all_users()
-        total_users = len(users)
-        
-        # Get some stats
-        total_downloads = sum(user.get('total_downloads', 0) for user in users)
-        total_uploads = sum(user.get('total_uploads', 0) for user in users)
-        
-        text = f"""📊 **Bot Statistics**
-
-👥 **Total Users:** {total_users}
-📥 **Total Downloads:** {total_downloads}
-📤 **Total Uploads:** {total_uploads}
-
-⚡ **Bot Status:** ✅ Online
-💾 **Database:** MongoDB
-🚀 **Speed:** 500 MB/s"""
-        
-        await message.reply_text(text)
-    except Exception as e:
-        await message.reply_text(f"❌ **Error:** {str(e)}")
-
 # Run bot
 if __name__ == "__main__":
     print("=" * 50)
@@ -769,6 +683,5 @@ if __name__ == "__main__":
     print(f"👨‍💻 Developer: {Config.DEVELOPER}")
     print(f"📢 Updates: {Config.UPDATE_CHANNEL}")
     print(f"⚡ Speed: 500 MB/s")
-    print(f"⏳ Cooldown: {COOLDOWN_TIME} seconds")
     print("=" * 50)
     app.run()
