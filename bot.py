@@ -322,13 +322,10 @@ async def handle_upload_type(client, callback: CallbackQuery):
         # Set cooldown timer
         user_cooldown[user_id] = time.time()
         
-        # Success message with cooldown
+        # Success message with cooldown (NO BUTTONS)
         cooldown_msg = await client.send_message(
             callback.message.chat.id,
-            f"✅ **Upload Complete!**\n\nYou can send new task after **{format_time(COOLDOWN_TIME)}**",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Start", callback_data="back_start")]
-            ])
+            f"✅ **Upload Complete!**\n\nYou can send new task after **{format_time(COOLDOWN_TIME)}**"
         )
         
         # Store message ID for later update
