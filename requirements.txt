@@ -9,3 +9,4 @@ dnspython
 libtorrent
 ffmpeg-python
 Pillow
+opencv-python
