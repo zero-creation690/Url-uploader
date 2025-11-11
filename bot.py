@@ -48,7 +48,8 @@ def get_remaining_time(user_id):
     remaining = COOLDOWN_TIME - elapsed
     
     if remaining <= 0:
-        del user_cooldowns[user_id]
+        if user_id in user_cooldowns:
+            del user_cooldowns[user_id]
         return 0
     
     return int(remaining)
@@ -58,14 +59,14 @@ def get_remaining_time(user_id):
 async def cooldown_refresher(client, message: Message, user_id):
     """Refreshes the cooldown status message every 10 seconds until cooldown expires."""
     
+    # Wait for a moment to ensure the message is fully sent
+    await asyncio.sleep(1)
+
     while True:
         remaining = get_remaining_time(user_id)
         
         if remaining <= 0:
             # Cooldown ended
-            if user_id in user_cooldowns:
-                del user_cooldowns[user_id]
-                
             try:
                 await message.edit_text(
                     "✅ **Upload Complete!**\n\n"
@@ -93,7 +94,7 @@ async def cooldown_refresher(client, message: Message, user_id):
 
 # --- Command Handlers ---
 
-# Start command - Auto-filter style with random reaction (Updated: Stylized text, Image, Simplified Keyboard)
+# Start command - Updated with: Stylized text, Image, Simplified Keyboard (Removed Status/Settings)
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     user_id = message.from_user.id
@@ -125,15 +126,19 @@ async def start_command(client, message: Message):
     ])
     
     # Send photo with caption
-    await client.send_photo(
-        chat_id=message.chat.id,
-        photo="https://ar-hosting.pages.dev/1762658234858.jpg",
-        caption=text,
-        reply_markup=keyboard,
-        disable_web_page_preview=True
-    )
+    try:
+        await client.send_photo(
+            chat_id=message.chat.id,
+            photo="https://ar-hosting.pages.dev/1762658234858.jpg",
+            caption=text,
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Failed to send photo in start command: {e}. Falling back to text.")
+        await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
 
-# Help command - Shows everything in one message
+# Help command 
 @app.on_callback_query(filters.regex("^help$"))
 async def help_callback(client, callback: CallbackQuery):
     text = Config.HELP_MESSAGE.format(
@@ -189,7 +194,7 @@ async def about_command(client, message: Message):
     
     await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
 
-# Settings menu (Still kept for /settings command)
+# Settings menu (Kept for direct command, but removed from main menu)
 @app.on_callback_query(filters.regex("^settings$"))
 async def settings_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -248,7 +253,7 @@ async def settings_command(client, message: Message):
     
     await message.reply_text(text, reply_markup=keyboard)
 
-# Status command (Still kept for /status command)
+# Status command (Kept for direct command, but removed from main menu)
 @app.on_callback_query(filters.regex("^status$"))
 async def status_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -419,6 +424,7 @@ async def handle_upload_type(client, callback: CallbackQuery):
         remaining = get_remaining_time(user_id)
         time_str = format_time(remaining)
         
+        # Send initial message which will be refreshed by the background task
         success_msg = await client.send_message(
             callback.message.chat.id,
             f"✅ **Upload Complete!**\n\n"
@@ -488,7 +494,7 @@ async def handle_rename_callback(client, callback: CallbackQuery):
         )
         await callback.answer()
 
-# Handle rename input first
+# Handle rename input first and main URL input
 @app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast"]))
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
