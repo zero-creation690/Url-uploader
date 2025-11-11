@@ -29,6 +29,12 @@ COOLDOWN_TIME = 159  # 2 minutes 39 seconds
 # Random emojis for reactions
 REACTION_EMOJIS = ["👍", "❤", "🔥", "🎉", "😍", "👏", "⚡", "✨", "💯", "🚀"]
 
+# --- Custom Reaction Emojis ---
+# Replacing the hardcoded 'a' list with the Pyrogram standard set
+CUSTOM_REACTION_EMOJIS = ["❤️", "🥰", "🔥", "💋", "😍", "😘", "☺️"]
+# --- End Custom Reaction Emojis ---
+
+
 def format_time(seconds):
     """Format seconds to minutes and seconds"""
     minutes = seconds // 60
@@ -46,10 +52,45 @@ def get_remaining_time(user_id):
     remaining = COOLDOWN_TIME - elapsed
     
     if remaining <= 0:
-        del user_cooldowns[user_cooldowns]
+        del user_cooldowns[user_id]
         return 0
     
     return int(remaining)
+
+# --- NEW FUNCTION FOR AUTOMATIC TIMER UPDATE (Previously implemented) ---
+async def cooldown_updater(client, message: Message, user_id):
+    """Automatically updates the cooldown timer message every 10 seconds."""
+    
+    while True:
+        remaining = get_remaining_time(user_id)
+        
+        if remaining <= 0:
+            # Cooldown expired, send final message
+            try:
+                # Send the final 'ready' message
+                await message.edit_text("You can send new task now 🚀")
+            except Exception:
+                # Handle case where message might have been deleted
+                pass
+            break
+        
+        # Calculate time string
+        time_str = format_time(remaining)
+        
+        # Edit message to show remaining time
+        text = f"✅ **Upload Complete!**\n\n" \
+               f"You can send new task after {time_str}"
+        
+        try:
+            # Edit the message text (reply_markup=None ensures no buttons appear)
+            await message.edit_text(text, reply_markup=None)
+        except Exception:
+            # Handle case where message might have been deleted or edited too quickly
+            pass
+        
+        # Wait 10 seconds before the next update
+        await asyncio.sleep(10)
+# --- END NEW FUNCTION ---
 
 # Start command - Auto-filter style with random reaction
 @app.on_message(filters.command("start") & filters.private)
@@ -60,14 +101,12 @@ async def start_command(client, message: Message):
     
     await db.add_user(user_id, username, first_name)
     
-    # Add random reaction to /start message
+    # Add random reaction to /start message (Using the previous set of emojis)
     try:
         random_emoji = random.choice(REACTION_EMOJIS)
         await message.react(random_emoji)
     except Exception as e:
         print(f"Reaction failed: {e}")
-    
-    # --- START: MODIFIED FOR TWO-MESSAGE WELCOME ---
     
     # 1. Send the first message confirming the command (similar to your friend's bot)
     await message.reply_text("You Can Send Me New Task Now")
@@ -91,8 +130,6 @@ async def start_command(client, message: Message):
     # 3. Send the main welcome message with buttons
     await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
     
-    # --- END: MODIFIED FOR TWO-MESSAGE WELCOME ---
-
 
 # Help command - Shows everything in one message
 @app.on_callback_query(filters.regex("^help$"))
@@ -288,7 +325,6 @@ async def back_start(client, callback: CallbackQuery):
         [InlineKeyboardButton("📢 Updates Channel", url=Config.UPDATE_CHANNEL)]
     ])
     
-    # Use edit_text to update the message containing the buttons
     await callback.message.edit_text(text, reply_markup=keyboard, disable_web_page_preview=True)
 
 # Handle file upload type selection
@@ -376,21 +412,20 @@ async def handle_upload_type(client, callback: CallbackQuery):
         # Set cooldown after successful upload
         user_cooldowns[user_id] = time.time()
         
-        # Success message with cooldown
+        # Success message setup (without buttons)
         remaining = get_remaining_time(user_id)
         time_str = format_time(remaining)
         
-        await client.send_message(
+        # Send the initial message to be updated later
+        success_msg = await client.send_message(
             callback.message.chat.id,
             f"✅ **Upload Complete!**\n\n"
-            f"You can send new task after {time_str}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Start", callback_data="back_start")]
-            ])
+            f"You can send new task after {time_str}"
+            # reply_markup is intentionally excluded
         )
         
-        # Start cooldown notification task
-        asyncio.create_task(cooldown_notification(client, callback.message.chat.id, user_id))
+        # Start the automatic timer update task
+        asyncio.create_task(cooldown_updater(client, success_msg, user_id))
         
         # Log to channel
         try:
@@ -413,23 +448,6 @@ async def handle_upload_type(client, callback: CallbackQuery):
         if user_id in user_tasks:
             del user_tasks[user_id]
 
-async def cooldown_notification(client, chat_id, user_id):
-    """Send notification when cooldown expires"""
-    remaining = get_remaining_time(user_id)
-    if remaining > 0:
-        await asyncio.sleep(remaining)
-    
-    # Check if cooldown is still active (user might have been removed)
-    if user_id in user_cooldowns:
-        del user_cooldowns[user_id]
-        
-        try:
-            await client.send_message(
-                chat_id,
-                "You can send new task now 🚀"
-            )
-        except:
-            pass
 
 # Handle rename callback
 @app.on_callback_query(filters.regex("^rename_"))
@@ -469,7 +487,44 @@ async def handle_rename_callback(client, callback: CallbackQuery):
         )
         await callback.answer()
 
-# Handle rename input first
+# --- NEW REACTION HANDLER ---
+@app.on_message(filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast"]))
+async def handle_reaction(client, message: Message):
+    # Check if the message is part of a media group, if so, skip reaction to avoid errors.
+    # Pyrogram does this check cleanly via message.media_group_id
+    if message.media_group_id:
+        return
+
+    # Check if the message is a text input for rename, if so, skip reaction
+    user_id = message.from_user.id
+    if user_id in user_tasks and user_tasks[user_id].get('waiting_rename'):
+        # Let the dedicated rename handler process this
+        # We continue to handle_text_input below, so we just return here
+        pass
+    
+    # Check if it's a valid URL/magnet link that should be processed as a task
+    url = message.text.strip() if message.text else ""
+    is_valid_task_input = is_url(url) or is_magnet(url)
+
+    # If it's *not* a task input (or is a valid text, photo, etc. that isn't a command)
+    # and not waiting for rename, apply the custom reaction.
+    if not is_valid_task_input:
+        try:
+            # Select a random emoji from the custom list
+            random_emoji = random.choice(CUSTOM_REACTION_EMOJIS)
+            # Use Pyrogram's built-in message.react() method
+            # Pyrogram automatically handles the ReactionType and message IDs internally
+            await message.react(random_emoji)
+        except Exception as e:
+            # Catch errors (e.g., if the user is in a group where reactions are disabled)
+            print(f"Custom reaction failed for message {message.id}: {e}")
+            
+    # Continue to the main text handler below
+    await handle_text_input(client, message)
+# --- END NEW REACTION HANDLER ---
+
+
+# Handle rename input first (or URL input if not renaming)
 @app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast"]))
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
@@ -521,6 +576,7 @@ async def handle_text_input(client, message: Message):
     url = message.text.strip()
     if not (is_url(url) or is_magnet(url)):
         print(f"[DEBUG] Not a valid URL, ignoring")
+        # NOTE: The reaction logic above handles the reaction for non-URL messages.
         return
     
     # Check cooldown before processing
@@ -784,5 +840,3 @@ if __name__ == "__main__":
     print(f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}")
     print("=" * 50)
     app.run()
-
-Don't change other
