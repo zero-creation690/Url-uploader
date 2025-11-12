@@ -182,32 +182,53 @@ class Downloader:
         try:
             print("Initializing torrent session...")
             
-            # Create session with settings
+            # Create session with aggressive settings for better peer discovery
             settings = {
                 'enable_dht': True,
                 'enable_lsd': True,
                 'enable_upnp': True,
                 'enable_natpmp': True,
-                'listen_interfaces': '0.0.0.0:6881',
+                'listen_interfaces': '0.0.0.0:6881,[::]:6881',
                 'download_rate_limit': 0,
                 'upload_rate_limit': 102400,
-                'connections_limit': 200,
+                'connections_limit': 500,
                 'alert_queue_size': 2000,
+                'dht_announce_interval': 300,
+                'min_reconnect_time': 1,
+                'peer_connect_timeout': 7,
+                'max_failcount': 2,
+                'announce_to_all_tiers': True,
+                'announce_to_all_trackers': True,
             }
             
             ses = lt.session(settings)
             
-            # Add DHT routers for better peer discovery
-            ses.add_dht_router("router.utorrent.com", 6881)
-            ses.add_dht_router("router.bittorrent.com", 6881)
-            ses.add_dht_router("dht.transmissionbt.com", 6881)
-            ses.add_dht_router("router.bitcomet.com", 6881)
+            # Add multiple DHT routers for better peer discovery
+            dht_routers = [
+                ("router.utorrent.com", 6881),
+                ("router.bittorrent.com", 6881),
+                ("dht.transmissionbt.com", 6881),
+                ("router.bitcomet.com", 6881),
+                ("dht.aelitis.com", 6881),
+                ("dht.libtorrent.org", 25401),
+            ]
+            
+            for router, port in dht_routers:
+                try:
+                    ses.add_dht_router(router, port)
+                except:
+                    pass
             
             print("Session created, adding torrent...")
             
             params = {
                 'save_path': self.torrent_dir,
                 'storage_mode': lt.storage_mode_t.storage_mode_sparse,
+                'flags': (
+                    lt.torrent_flags.upload_mode | 
+                    lt.torrent_flags.auto_managed | 
+                    lt.torrent_flags.duplicate_is_error
+                ),
             }
             
             # Check if it's a magnet link or file
@@ -224,24 +245,27 @@ class Downloader:
             
             print("⏳ Waiting for metadata...")
             if progress_callback:
-                await progress_callback(0, 100, "Connecting to peers...")
+                await progress_callback(0, 100, "Connecting to DHT network...")
             
-            # Wait for metadata with timeout
-            metadata_timeout = 120
+            # Wait for metadata with extended timeout
+            metadata_timeout = 180  # 3 minutes for metadata
             start = time.time()
+            last_peer_update = 0
             
             while not handle.has_metadata():
-                if time.time() - start > metadata_timeout:
+                elapsed = time.time() - start
+                
+                if elapsed > metadata_timeout:
                     if ses and handle:
                         ses.remove_torrent(handle)
-                    return None, "⚠️ Timeout waiting for metadata. Magnet link may be dead or no peers available."
+                    return None, "⚠️ Timeout waiting for metadata. This torrent may be:\n• Dead (no seeders)\n• Invalid magnet link\n• Blocked by your network"
                 
                 # Process alerts for errors
                 alerts = ses.pop_alerts()
                 for alert in alerts:
                     alert_type = type(alert).__name__
+                    print(f"Alert: {alert_type} - {alert}")
                     if 'error' in alert_type.lower():
-                        print(f"❌ Alert: {alert}")
                         if ses and handle:
                             ses.remove_torrent(handle)
                         return None, f"Torrent error: {alert}"
@@ -249,8 +273,11 @@ class Downloader:
                 s = handle.status()
                 peers = s.num_peers
                 
-                if progress_callback and int(time.time() - start) % 5 == 0:
-                    await progress_callback(0, 100, f"Finding peers... ({peers} connected)")
+                # Update progress callback
+                if progress_callback and (elapsed - last_peer_update) >= 3:
+                    last_peer_update = elapsed
+                    status = f"Finding peers... ({peers} connected, {int(elapsed)}s elapsed)"
+                    await progress_callback(0, 100, status)
                 
                 await asyncio.sleep(1)
             
@@ -274,16 +301,26 @@ class Downloader:
             last_progress = -1
             stalled_time = 0
             last_downloaded = 0
+            no_peer_time = 0
             
             while not handle.is_seed():
                 s = handle.status()
                 
+                # Check if we have any peers
+                if s.num_peers == 0:
+                    no_peer_time += 1
+                    if no_peer_time > 120:  # 2 minutes with no peers
+                        ses.remove_torrent(handle)
+                        return None, "❌ No peers found. This torrent appears to be dead (no seeders available)."
+                else:
+                    no_peer_time = 0
+                
                 # Check for stalled download
-                if s.total_done == last_downloaded:
+                if s.total_done == last_downloaded and s.num_peers > 0:
                     stalled_time += 1
                     if stalled_time > 180:  # 3 minutes stalled
                         ses.remove_torrent(handle)
-                        return None, "❌ Download stalled - no data received for 3 minutes"
+                        return None, "❌ Download stalled - no data received for 3 minutes despite having peers"
                 else:
                     stalled_time = 0
                     last_downloaded = s.total_done
@@ -293,9 +330,9 @@ class Downloader:
                 upload_rate = s.upload_rate / 1024 / 1024
                 
                 # Update progress
-                if progress_callback and abs(progress - last_progress) >= 1:
+                if progress_callback and abs(progress - last_progress) >= 0.5:
                     last_progress = progress
-                    status_msg = f"↓ {download_rate:.1f} MB/s | ↑ {upload_rate:.1f} MB/s | {s.num_peers} peers | {progress:.1f}%"
+                    status_msg = f"Torrenting | ↓ {download_rate:.1f} MB/s | {s.num_peers} peers | {progress:.1f}%"
                     await progress_callback(
                         int(s.total_done),
                         int(s.total_wanted),
@@ -336,6 +373,8 @@ class Downloader:
             
         except Exception as e:
             print(f"❌ Exception: {e}")
+            import traceback
+            traceback.print_exc()
             if ses and handle:
                 try:
                     ses.remove_torrent(handle)
