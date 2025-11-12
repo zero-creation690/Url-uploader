@@ -6,7 +6,10 @@ from pyrogram.enums import ParseMode
 from config import Config
 from database import db
 from downloader import downloader
-from helpers import Progress, humanbytes, is_url, is_magnet
+from helpers import (
+    Progress, humanbytes, is_url, is_magnet, 
+    is_video_file, get_file_extension, sanitize_filename
+)
 import time
 import random
 
@@ -76,7 +79,6 @@ async def start_command(client, message: Message):
         channel=Config.UPDATE_CHANNEL
     )
     
-    # Modified buttons - removed Settings and Status
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📚 Help", callback_data="help"),
          InlineKeyboardButton("ℹ️ About", callback_data="about")],
@@ -94,7 +96,7 @@ async def start_command(client, message: Message):
         # Fallback if image fails
         await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
 
-# Help command - Shows everything in one message
+# Help command
 @app.on_callback_query(filters.regex("^help$"))
 async def help_callback(client, callback: CallbackQuery):
     text = Config.HELP_MESSAGE.format(
@@ -155,6 +157,222 @@ async def about_command(client, message: Message):
 async def settings_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
     settings = user_settings.get(user_id, {})
+    
+    thumbnail = settings.get('thumbnail')
+    
+    if thumbnail and os.path.exists(thumbnail):
+        try:
+            os.remove(thumbnail)
+            user_settings[user_id]['thumbnail'] = None
+            await callback.message.edit_caption(
+                caption="✅ **Thumbnail deleted successfully!**"
+            )
+            await callback.answer("Thumbnail deleted!", show_alert=True)
+        except Exception as e:
+            await callback.answer(f"Error: {str(e)}", show_alert=True)
+    else:
+        await callback.answer("No thumbnail to delete!", show_alert=True)
+
+# Total stats command (owner only)
+@app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
+async def total_command(client, message: Message):
+    stats = await db.get_stats()
+    
+    text = f"""📈 **Bot Statistics**
+
+👥 **Users:**
+• Total Users: {stats['total_users']}
+
+📊 **Activity:**
+• Total Downloads: {stats['total_downloads']}
+• Total Uploads: {stats['total_uploads']}
+
+⚙️ **Bot Info:**
+• Speed: Up to 500 MB/s
+• Max Size: 4 GB
+• Cooldown: {COOLDOWN_TIME} seconds ({format_time(COOLDOWN_TIME)})
+• Status: ✅ Online
+
+**Developer:** {Config.DEVELOPER}
+**Updates:** {Config.UPDATE_CHANNEL}"""
+    
+    await message.reply_text(text)
+
+# Broadcast (owner only)
+@app.on_message(filters.command("broadcast") & filters.user(Config.OWNER_ID))
+async def broadcast_command(client, message: Message):
+    if not message.reply_to_message:
+        await message.reply_text("❌ **Reply to a message to broadcast!**")
+        return
+    
+    users = await db.get_all_users()
+    broadcast_msg = message.reply_to_message
+    
+    success = 0
+    failed = 0
+    blocked = 0
+    deleted = 0
+    
+    status_msg = await message.reply_text("📢 **Broadcasting...**\n\nStarting...")
+    
+    for idx, user in enumerate(users):
+        try:
+            await broadcast_msg.copy(user['user_id'])
+            success += 1
+        except Exception as e:
+            failed += 1
+            error_str = str(e).lower()
+            if 'blocked' in error_str:
+                blocked += 1
+            elif 'deleted' in error_str or 'deactivated' in error_str:
+                deleted += 1
+        
+        # Update status every 50 users
+        if (idx + 1) % 50 == 0:
+            try:
+                await status_msg.edit_text(
+                    f"📢 **Broadcasting...**\n\n"
+                    f"✅ Success: {success}\n"
+                    f"❌ Failed: {failed}\n"
+                    f"🚫 Blocked: {blocked}\n"
+                    f"👻 Deleted: {deleted}\n"
+                    f"📊 Progress: {idx + 1}/{len(users)}"
+                )
+            except:
+                pass
+        
+        await asyncio.sleep(0.05)  # Rate limiting
+    
+    await status_msg.edit_text(
+        f"✅ **Broadcast Complete!**\n\n"
+        f"✅ **Success:** {success}\n"
+        f"❌ **Failed:** {failed}\n"
+        f"🚫 **Blocked:** {blocked}\n"
+        f"👻 **Deleted:** {deleted}\n"
+        f"📊 **Total:** {len(users)}"
+    )
+
+# Cancel command - Cancel current task
+@app.on_message(filters.command("cancel") & filters.private)
+async def cancel_command(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id in user_tasks:
+        task = user_tasks[user_id]
+        filepath = task.get('filepath')
+        
+        # Clean up file
+        if filepath:
+            downloader.cleanup(filepath)
+        
+        # Remove task
+        del user_tasks[user_id]
+        
+        await message.reply_text(
+            "✅ **Task cancelled successfully!**\n\n"
+            "You can send a new URL/magnet link."
+        )
+    else:
+        await message.reply_text(
+            "❌ **No active task to cancel!**\n\n"
+            "Send a URL or magnet link to start downloading."
+        )
+
+# Ping command - Check bot status
+@app.on_message(filters.command("ping") & filters.private)
+async def ping_command(client, message: Message):
+    start = time.time()
+    reply = await message.reply_text("🏓 **Pinging...**")
+    end = time.time()
+    
+    ms = (end - start) * 1000
+    
+    await reply.edit_text(
+        f"🏓 **Pong!**\n\n"
+        f"⚡ **Response Time:** `{ms:.2f}ms`\n"
+        f"✅ **Status:** Online"
+    )
+
+# Error handler for the bot
+@app.on_message(filters.private)
+async def catch_all(client, message: Message):
+    """Catch-all handler for unhandled messages"""
+    # Ignore if already handled
+    if message.text and message.text.startswith('/'):
+        await message.reply_text(
+            "❓ **Unknown command!**\n\n"
+            "Use /help to see available commands."
+        )
+
+# Startup message
+async def startup():
+    """Send startup notification"""
+    try:
+        await app.send_message(
+            Config.OWNER_ID,
+            "🚀 **Bot Started Successfully!**\n\n"
+            f"⚡ Speed: Up to 500 MB/s\n"
+            f"💾 Max Size: 4 GB\n"
+            f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}\n"
+            f"✅ Status: Online"
+        )
+    except Exception as e:
+        print(f"Startup notification failed: {e}")
+
+# Shutdown handler
+async def shutdown():
+    """Cleanup on shutdown"""
+    print("🛑 Bot shutting down...")
+    
+    # Cleanup all active downloads
+    for user_id, task in list(user_tasks.items()):
+        filepath = task.get('filepath')
+        if filepath:
+            downloader.cleanup(filepath)
+    
+    user_tasks.clear()
+    
+    try:
+        await app.send_message(
+            Config.OWNER_ID,
+            "🛑 **Bot Stopped!**\n\n"
+            "The bot has been shut down."
+        )
+    except:
+        pass
+    
+    print("✅ Cleanup complete!")
+
+# Run bot
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🚀 URL Uploader Bot Starting...")
+    print(f"👨‍💻 Developer: {Config.DEVELOPER}")
+    print(f"📢 Updates: {Config.UPDATE_CHANNEL}")
+    print(f"⚡ Speed: Up to 500 MB/s")
+    print(f"💾 Max Size: 4 GB")
+    print(f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}")
+    print(f"🤖 Bot: @{app.me.username if hasattr(app, 'me') else 'Loading...'}")
+    print("=" * 60)
+    
+    try:
+        # Send startup notification
+        app.start()
+        asyncio.get_event_loop().run_until_complete(startup())
+        
+        # Keep bot running
+        from pyrogram import idle
+        idle()
+        
+    except KeyboardInterrupt:
+        print("\n⚠️ Keyboard interrupt received!")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+    finally:
+        # Cleanup on exit
+        asyncio.get_event_loop().run_until_complete(shutdown())
+        app.stop()
+        print("👋 Bot stopped successfully!")
     
     text = """⚙️ **Bot Settings**
 
@@ -229,7 +447,7 @@ async def status_callback(client, callback: CallbackQuery):
 • Member since: {user_data.get('joined_date').strftime('%Y-%m-%d')}
 
 ⚡ **Bot Info:**
-• Speed: 500 MB/s
+• Speed: Up to 500 MB/s
 • Max size: 4 GB
 • Status: ✅ Online"""
     else:
@@ -260,7 +478,7 @@ async def status_command(client, message: Message):
 • Member since: {user_data.get('joined_date').strftime('%Y-%m-%d')}
 
 ⚡ **Bot Info:**
-• Speed: 500 MB/s
+• Speed: Up to 500 MB/s
 • Max size: 4 GB
 • Status: ✅ Online"""
     else:
@@ -280,7 +498,6 @@ async def back_start(client, callback: CallbackQuery):
         channel=Config.UPDATE_CHANNEL
     )
     
-    # Modified buttons - removed Settings and Status
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📚 Help", callback_data="help"),
          InlineKeyboardButton("ℹ️ About", callback_data="about")],
@@ -316,8 +533,7 @@ async def handle_upload_type(client, callback: CallbackQuery):
         caption = settings.get('caption', 
             f"📁 **{filename}**\n\n"
             f"💾 **Size:** {humanbytes(filesize)}\n"
-            f"⚡ **Speed:** 500 MB/s\n\n"
-            f"**Uploaded by:** {Config.DEVELOPER}"
+            f"⚡ **Powered by:** {Config.DEVELOPER}"
         )
         
         # Progress tracker
@@ -335,13 +551,10 @@ async def handle_upload_type(client, callback: CallbackQuery):
             )
         else:  # original
             # Auto-detect and upload in original format
-            from helpers import is_video_file, get_file_extension
-            
             ext = get_file_extension(filepath).lower()
             image_exts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff']
             
             if ext in image_exts:
-                # Upload as photo (preserves aspect ratio)
                 await client.send_photo(
                     chat_id=callback.message.chat.id,
                     photo=filepath,
@@ -350,7 +563,7 @@ async def handle_upload_type(client, callback: CallbackQuery):
                     progress_args=("Uploading",)
                 )
             elif is_video_file(filepath):
-                # Upload as video with metadata
+                # Get video metadata
                 duration = width = height = 0
                 try:
                     import subprocess
@@ -383,7 +596,7 @@ async def handle_upload_type(client, callback: CallbackQuery):
                     progress_args=("Uploading",)
                 )
             else:
-                # Fallback to document for unknown types
+                # Fallback to document
                 await client.send_document(
                     chat_id=callback.message.chat.id,
                     document=filepath,
@@ -396,12 +609,16 @@ async def handle_upload_type(client, callback: CallbackQuery):
         await db.update_stats(user_id, upload=True)
         await db.log_action(user_id, "upload", filepath)
         
-        await callback.message.delete()
+        # Delete progress message
+        try:
+            await callback.message.delete()
+        except:
+            pass
         
         # Set cooldown after successful upload
         user_cooldowns[user_id] = time.time()
         
-        # Success message with cooldown - NO INLINE BUTTONS
+        # Success message with cooldown
         remaining = get_remaining_time(user_id)
         time_str = format_time(remaining)
         
@@ -430,7 +647,12 @@ async def handle_upload_type(client, callback: CallbackQuery):
             pass
         
     except Exception as e:
-        await callback.message.edit_text(f"❌ **Upload Failed!**\n\n**Error:** {str(e)}")
+        error_msg = str(e)
+        await callback.message.edit_text(
+            f"❌ **Upload Failed!**\n\n"
+            f"**Error:** {error_msg[:200]}"
+        )
+        print(f"Upload error for user {user_id}: {error_msg}")
     
     finally:
         downloader.cleanup(filepath)
@@ -438,7 +660,7 @@ async def handle_upload_type(client, callback: CallbackQuery):
             del user_tasks[user_id]
 
 async def cooldown_refresh_message(client, message, user_id):
-    """Refresh the cooldown message every 10 seconds with improved error handling"""
+    """Refresh the cooldown message every 10 seconds"""
     last_text = ""
     consecutive_errors = 0
     max_consecutive_errors = 3
@@ -448,22 +670,14 @@ async def cooldown_refresh_message(client, message, user_id):
             remaining = get_remaining_time(user_id)
             
             if remaining <= 0:
-                # Cooldown finished - send completion message
+                # Cooldown finished
                 try:
                     await message.edit_text(
                         "✅ **Upload Complete!**\n\n"
                         "🚀 **You can send new task now!**"
                     )
-                except Exception as e:
-                    print(f"Error updating final cooldown message: {e}")
-                    # Try sending new message if edit fails
-                    try:
-                        await client.send_message(
-                            message.chat.id,
-                            "🚀 **You can send new task now!**"
-                        )
-                    except:
-                        pass
+                except Exception:
+                    pass
                 break
             
             # Create new message text
@@ -473,28 +687,26 @@ async def cooldown_refresh_message(client, message, user_id):
                 f"⏳ You can send new task after **{time_str}**"
             )
             
-            # Only update if text has changed
+            # Only update if text changed
             if new_text != last_text:
                 try:
                     await message.edit_text(new_text)
                     last_text = new_text
-                    consecutive_errors = 0  # Reset error counter on success
+                    consecutive_errors = 0
                 except Exception as e:
                     consecutive_errors += 1
-                    print(f"Error refreshing cooldown message (attempt {consecutive_errors}): {e}")
+                    error_str = str(e).lower()
                     
-                    # If too many consecutive errors, stop trying
-                    if consecutive_errors >= max_consecutive_errors:
-                        print(f"Stopping cooldown refresh for user {user_id} due to repeated errors")
+                    # Stop if message was deleted or too many errors
+                    if 'not found' in error_str or consecutive_errors >= max_consecutive_errors:
                         break
             
-            # Wait 10 seconds before next update
             await asyncio.sleep(10)
             
     except asyncio.CancelledError:
-        print(f"Cooldown refresh task cancelled for user {user_id}")
+        pass
     except Exception as e:
-        print(f"Unexpected error in cooldown refresh: {e}")
+        print(f"Cooldown refresh error: {e}")
 
 # Handle rename callback
 @app.on_callback_query(filters.regex("^rename_"))
@@ -514,44 +726,36 @@ async def handle_rename_callback(client, callback: CallbackQuery):
         
         await callback.message.edit_text(
             f"📝 **Send new name for this file**\n\n"
-            f"Current: `{filename}`\n\n"
-            f"Type the new filename and send:"
+            f"📁 Current: `{filename}`\n\n"
+            f"Type the new filename (with extension) and send:"
         )
-        await callback.answer("Type new filename and send")
+        await callback.answer("Type new filename and send", show_alert=False)
         
     elif data == "rename_skip":
         # Skip rename, show upload options
         user_tasks[user_id]['waiting_rename'] = False
         
-        # Simple universal upload options
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📤 Upload as Original", callback_data="upload_original")],
             [InlineKeyboardButton("📁 Upload as Document", callback_data="upload_doc")]
         ])
         
         await callback.message.edit_text(
-            "**Choose upload type:**\n\nHow do you want to upload this file?",
+            "**Choose upload type:**\n\n"
+            "How do you want to upload this file?",
             reply_markup=keyboard
         )
         await callback.answer()
 
-# Handle rename input first
+# Handle text input (URL or rename)
 @app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast"]))
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
     
-    # Debug: Check if user has active task
-    print(f"[DEBUG] User {user_id} sent text: {message.text[:50]}")
-    print(f"[DEBUG] Active tasks: {user_id in user_tasks}")
-    if user_id in user_tasks:
-        print(f"[DEBUG] Waiting for rename: {user_tasks[user_id].get('waiting_rename', False)}")
-    
     # Check if waiting for rename
     if user_id in user_tasks and user_tasks[user_id].get('waiting_rename'):
-        new_name = message.text.strip()
+        new_name = sanitize_filename(message.text.strip())
         filepath = user_tasks[user_id]['filepath']
-        
-        print(f"[DEBUG] Renaming {filepath} to {new_name}")
         
         # Create new path with new name
         new_path = os.path.join(os.path.dirname(filepath), new_name)
@@ -563,8 +767,6 @@ async def handle_text_input(client, message: Message):
                 user_tasks[user_id]['filepath'] = new_path
                 user_tasks[user_id]['waiting_rename'] = False
                 
-                print(f"[DEBUG] Rename successful!")
-                
                 # Show upload options
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("📤 Upload as Original", callback_data="upload_original")],
@@ -572,24 +774,24 @@ async def handle_text_input(client, message: Message):
                 ])
                 
                 await message.reply_text(
-                    f"✅ **Renamed to:** `{new_name}`\n\n**Choose upload type:**",
+                    f"✅ **Renamed to:** `{new_name}`\n\n"
+                    f"**Choose upload type:**",
                     reply_markup=keyboard
                 )
             else:
-                print(f"[DEBUG] File not found: {filepath}")
                 await message.reply_text("❌ **Error:** File not found!")
+                if user_id in user_tasks:
+                    del user_tasks[user_id]
         except Exception as e:
-            print(f"[DEBUG] Rename error: {str(e)}")
             await message.reply_text(f"❌ **Rename failed:** {str(e)}")
         return
     
-    # If not waiting for rename, check if it's a URL
+    # Check if it's a URL or magnet
     url = message.text.strip()
     if not (is_url(url) or is_magnet(url)):
-        print(f"[DEBUG] Not a valid URL, ignoring")
         return
     
-    # Check cooldown before processing
+    # Check cooldown
     remaining = get_remaining_time(user_id)
     if remaining > 0:
         time_str = format_time(remaining)
@@ -599,16 +801,15 @@ async def handle_text_input(client, message: Message):
         )
         return
     
-    print(f"[DEBUG] Processing as download URL")
     # Process as download
     await process_download(client, message, url)
 
-# Main download handler
+# Handle torrent files
 @app.on_message(filters.document & filters.private)
 async def handle_document(client, message: Message):
     user_id = message.from_user.id
     
-    # Check cooldown for torrent uploads too
+    # Check cooldown
     remaining = get_remaining_time(user_id)
     if remaining > 0:
         time_str = format_time(remaining)
@@ -620,8 +821,13 @@ async def handle_document(client, message: Message):
     
     # Check if it's a torrent file
     if message.document and message.document.file_name.endswith('.torrent'):
-        torrent_path = await message.download()
-        await process_download(client, message, torrent_path)
+        status_msg = await message.reply_text("📥 **Downloading torrent file...**")
+        try:
+            torrent_path = await message.download()
+            await status_msg.delete()
+            await process_download(client, message, torrent_path)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ **Error downloading torrent:** {str(e)}")
 
 # Download processing function
 async def process_download(client, message: Message, url):
@@ -630,15 +836,25 @@ async def process_download(client, message: Message, url):
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name)
     
     # Start download
-    status_msg = await message.reply_text("🔄 **Processing your request...**\n\nStarting download...")
+    status_msg = await message.reply_text(
+        "🔄 **Processing your request...**\n\n"
+        "Starting download..."
+    )
     
     try:
         # Download with progress
         progress = Progress(client, status_msg)
-        filepath, error = await downloader.download(url, progress_callback=progress.progress_callback)
+        filepath, error = await downloader.download(
+            url, 
+            progress_callback=progress.progress_callback
+        )
         
         if error:
-            await status_msg.edit_text(f"❌ **Error:** {error}\n\nPlease check the URL and try again.")
+            await status_msg.edit_text(
+                f"❌ **Download Failed!**\n\n"
+                f"**Error:** {error}\n\n"
+                f"Please check the URL and try again."
+            )
             return
         
         await db.update_stats(user_id, download=True)
@@ -659,9 +875,8 @@ async def process_download(client, message: Message, url):
         text = (
             f"✅ **Download Complete!**\n\n"
             f"📁 **File:** `{filename}`\n"
-            f"💾 **Size:** {humanbytes(filesize)}\n"
-            f"⚡ **Speed:** 500 MB/s\n\n"
-            f"📝 **Send new name for this file** - 📁 `{filename}`"
+            f"💾 **Size:** {humanbytes(filesize)}\n\n"
+            f"Do you want to rename this file?"
         )
         
         keyboard = InlineKeyboardMarkup([
@@ -685,7 +900,10 @@ async def process_download(client, message: Message, url):
             pass
             
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Error:** {str(e)}\n\nSomething went wrong. Please try again.")
+        await status_msg.edit_text(
+            f"❌ **Error:** {str(e)[:300]}\n\n"
+            f"Something went wrong. Please try again."
+        )
         await db.log_action(user_id, "error", str(e))
 
 # Settings commands
@@ -693,10 +911,13 @@ async def process_download(client, message: Message, url):
 async def setname_command(client, message: Message):
     user_id = message.from_user.id
     if len(message.command) < 2:
-        await message.reply_text("**Usage:** `/setname filename.ext`\n\nExample: `/setname movie.mp4`")
+        await message.reply_text(
+            "**Usage:** `/setname filename.ext`\n\n"
+            "**Example:** `/setname movie.mp4`"
+        )
         return
     
-    filename = " ".join(message.command[1:])
+    filename = sanitize_filename(" ".join(message.command[1:]))
     if user_id not in user_settings:
         user_settings[user_id] = {}
     user_settings[user_id]['filename'] = filename
@@ -707,7 +928,10 @@ async def setname_command(client, message: Message):
 async def setcaption_command(client, message: Message):
     user_id = message.from_user.id
     if len(message.command) < 2:
-        await message.reply_text("**Usage:** `/setcaption Your caption here`")
+        await message.reply_text(
+            "**Usage:** `/setcaption Your caption here`\n\n"
+            "This will be used for all your uploads."
+        )
         return
     
     caption = message.text.split(None, 1)[1]
@@ -728,20 +952,29 @@ async def clearsettings_command(client, message: Message):
 @app.on_message(filters.photo & filters.private)
 async def handle_thumbnail(client, message: Message):
     user_id = message.from_user.id
-    thumb_path = await message.download(file_name=f"{Config.DOWNLOAD_DIR}/thumb_{user_id}.jpg")
     
-    if user_id not in user_settings:
-        user_settings[user_id] = {}
-    user_settings[user_id]['thumbnail'] = thumb_path
+    status_msg = await message.reply_text("📥 Downloading thumbnail...")
     
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑️ Delete Thumbnail", callback_data="delete_thumb")]
-    ])
-    
-    await message.reply_text(
-        "✅ **Saved your thumbnail**",
-        reply_markup=keyboard
-    )
+    try:
+        thumb_path = await message.download(
+            file_name=f"{Config.DOWNLOAD_DIR}/thumb_{user_id}.jpg"
+        )
+        
+        if user_id not in user_settings:
+            user_settings[user_id] = {}
+        user_settings[user_id]['thumbnail'] = thumb_path
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Delete Thumbnail", callback_data="delete_thumb")]
+        ])
+        
+        await status_msg.edit_text(
+            "✅ **Thumbnail saved successfully!**\n\n"
+            "This will be used for all video/document uploads.",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Error:** {str(e)}")
 
 # Show thumbnail command
 @app.on_message(filters.command("showthumb") & filters.private)
@@ -772,81 +1005,3 @@ async def showthumb_command(client, message: Message):
 async def delete_thumb_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
     settings = user_settings.get(user_id, {})
-    
-    thumbnail = settings.get('thumbnail')
-    
-    if thumbnail and os.path.exists(thumbnail):
-        try:
-            os.remove(thumbnail)
-            user_settings[user_id]['thumbnail'] = None
-            await callback.message.edit_caption(
-                caption="✅ **Thumbnail deleted successfully!**"
-            )
-            await callback.answer("Thumbnail deleted!", show_alert=True)
-        except Exception as e:
-            await callback.answer(f"Error: {str(e)}", show_alert=True)
-    else:
-        await callback.answer("No thumbnail to delete!", show_alert=True)
-
-# Total stats command (owner only)
-@app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
-async def total_command(client, message: Message):
-    stats = await db.get_stats()
-    
-    text = f"""📈 **Bot Statistics**
-
-👥 **Users:**
-• Total Users: {stats['total_users']}
-
-📊 **Activity:**
-• Total Downloads: {stats['total_downloads']}
-• Total Uploads: {stats['total_uploads']}
-
-⚙️ **Bot Info:**
-• Speed: 500 MB/s
-• Max Size: 4 GB
-• Cooldown: {COOLDOWN_TIME} seconds ({format_time(COOLDOWN_TIME)})
-• Status: ✅ Online
-
-**Developer:** {Config.DEVELOPER}
-**Updates:** {Config.UPDATE_CHANNEL}"""
-    
-    await message.reply_text(text)
-
-# Broadcast (owner only)
-@app.on_message(filters.command("broadcast") & filters.user(Config.OWNER_ID))
-async def broadcast_command(client, message: Message):
-    if not message.reply_to_message:
-        await message.reply_text("❌ Reply to a message to broadcast!")
-        return
-    
-    users = await db.get_all_users()
-    broadcast_msg = message.reply_to_message
-    
-    success = 0
-    failed = 0
-    status_msg = await message.reply_text("📢 Broadcasting...")
-    
-    for user in users:
-        try:
-            await broadcast_msg.copy(user['user_id'])
-            success += 1
-            await asyncio.sleep(0.05)
-        except:
-            failed += 1
-    
-    await status_msg.edit_text(
-        f"✅ **Broadcast Complete!**\n\n"
-        f"Success: {success}\nFailed: {failed}"
-    )
-
-# Run bot
-if __name__ == "__main__":
-    print("=" * 50)
-    print("🚀 URL Uploader Bot Starting...")
-    print(f"👨‍💻 Developer: {Config.DEVELOPER}")
-    print(f"📢 Updates: {Config.UPDATE_CHANNEL}")
-    print(f"⚡ Speed: 500 MB/s")
-    print(f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}")
-    print("=" * 50)
-    app.run()
