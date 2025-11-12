@@ -6,6 +6,7 @@ from pyrogram.enums import ParseMode
 from config import Config
 from database import db
 from downloader import downloader
+# Updated import line to include the new functions
 from helpers import Progress, humanbytes, is_url, is_magnet, create_video_thumbnail, fix_video_metadata
 import time
 import random
