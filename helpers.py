@@ -12,8 +12,9 @@ class Progress:
         self.message = message
         self.start_time = time.time()
         self.last_update = 0
-        self.update_interval = 2.0  # Update every 2 seconds to reduce API calls
-        self.last_percentage = -1  # Track last percentage to avoid duplicate updates
+        self.update_interval = 1.5  # Update every 1.5 seconds for better feedback
+        self.last_percentage = -1
+        self.last_text = ""  # Cache last message to avoid duplicate edits
         
     async def progress_callback(self, current, total, status="Downloading"):
         """Progress callback with beautiful box-style formatting - Optimized"""
@@ -23,60 +24,82 @@ class Progress:
         percentage = calculate_percentage(current, total)
         
         # Skip update if:
-        # 1. Too soon since last update
-        # 2. Percentage hasn't changed by at least 2%
+        # 1. Too soon since last update AND percentage change is small
+        # 2. Avoid hammering API with identical updates
         if (now - self.last_update < self.update_interval and 
-            abs(percentage - self.last_percentage) < 2):
+            abs(percentage - self.last_percentage) < 1):
             return
             
-        self.last_update = now
-        self.last_percentage = percentage
         elapsed = now - self.start_time
         
         if current == 0 or elapsed == 0:
+            # Initial state - show connecting message
+            if now - self.last_update < self.update_interval:
+                return
+            
+            text = (
+                "╭────────────────────────────────╮\n"
+                f"│ ⚡ **{status}**\n"
+                "│\n"
+                "│ [░░░░░░░░░░░░░░░░░░░░] **0.0%**\n"
+                "│\n"
+                "│ 📦 **Size:** `Calculating...`\n"
+                "│ ⚡ **Speed:** `Starting...`\n"
+                "│ ⏱️ **ETA:** `Calculating...`\n"
+                "│ ⏰ **Elapsed:** `0s`\n"
+                "╰────────────────────────────────╯"
+            )
+        else:
+            # Normal progress update
+            self.last_update = now
+            self.last_percentage = percentage
+            
+            # Optimized calculations
+            speed = current / elapsed
+            speed_mb = speed / (1024 * 1024)
+            eta_seconds = max(0, (total - current) / speed) if speed > 0 else 0
+            
+            # Format data efficiently
+            current_mb = current / (1024 * 1024)
+            total_mb = total / (1024 * 1024)
+            
+            # Create beautiful boxed progress bar (20 blocks)
+            progress_bar = create_progress_bar(percentage, length=20)
+            
+            # Status emoji and icon
+            status_config = get_status_config(status)
+            
+            # Speed indicator
+            speed_indicator = get_speed_indicator(speed_mb)
+            
+            # Create stunning boxed progress message
+            text = (
+                "╭────────────────────────────────╮\n"
+                f"│ {status_config['emoji']} **{status}**\n"
+                "│\n"
+                f"│ [{progress_bar}] **{percentage:.1f}%**\n"
+                "│\n"
+                f"│ 📦 **Size:** `{current_mb:.1f}` / `{total_mb:.1f} MB`\n"
+                f"│ {status_config['icon']} **Speed:** `{speed_mb:.1f} MB/s` {speed_indicator}\n"
+                f"│ ⏱️ **ETA:** `{format_time(eta_seconds)}`\n"
+                f"│ ⏰ **Elapsed:** `{format_time(elapsed)}`\n"
+                "╰────────────────────────────────╯"
+            )
+        
+        # Only update if text actually changed
+        if text == self.last_text:
             return
-        
-        # Optimized calculations
-        speed = current / elapsed
-        speed_mb = speed / (1024 * 1024)
-        eta_seconds = max(0, (total - current) / speed) if speed > 0 else 0
-        
-        # Format data efficiently
-        current_mb = current / (1024 * 1024)
-        total_mb = total / (1024 * 1024)
-        
-        # Create beautiful boxed progress bar (20 blocks for faster rendering)
-        progress_bar = create_progress_bar(percentage, length=20)
-        
-        # Box borders
-        top_border = "╭" + "─" * 32 + "╮"
-        bottom_border = "╰" + "─" * 32 + "╯"
-        
-        # Status emoji and icon (optimized with dict lookup)
-        status_config = get_status_config(status)
-        
-        # Speed indicator
-        speed_indicator = get_speed_indicator(speed_mb)
-        
-        # Create stunning boxed progress message
-        text = (
-            f"{top_border}\n"
-            f"│ {status_config['emoji']} **{status}**\n"
-            f"│\n"
-            f"│ [{progress_bar}] **{percentage:.1f}%**\n"
-            f"│\n"
-            f"│ 📦 **Size:** `{current_mb:.1f}` / `{total_mb:.1f} MB`\n"
-            f"│ {status_config['icon']} **Speed:** `{speed_mb:.1f} MB/s` {speed_indicator}\n"
-            f"│ ⏱️ **ETA:** `{format_time(eta_seconds)}`\n"
-            f"│ ⏰ **Elapsed:** `{format_time(elapsed)}`\n"
-            f"{bottom_border}"
-        )
+            
+        self.last_text = text
         
         try:
             await self.message.edit_text(text, disable_web_page_preview=True)
-        except Exception:
-            # Silently ignore edit errors (message too old, same content, etc.)
-            pass
+        except Exception as e:
+            # Handle common errors silently
+            error_msg = str(e).lower()
+            if not any(x in error_msg for x in ['not modified', 'message to edit not found', 'message is not modified']):
+                # Only print unexpected errors
+                print(f"Progress update error: {e}")
 
 def get_status_config(status):
     """Get status configuration - Optimized with dict"""
@@ -86,6 +109,10 @@ def get_status_config(status):
         'download': {'emoji': '📥', 'icon': '⬇️'},
         'upload': {'emoji': '📤', 'icon': '⬆️'},
         'torrent': {'emoji': '🌊', 'icon': '🔄'},
+        'processing': {'emoji': '⚙️', 'icon': '⚡'},
+        'connecting': {'emoji': '🔗', 'icon': '⚡'},
+        'finding': {'emoji': '🔍', 'icon': '⚡'},
+        'starting': {'emoji': '🚀', 'icon': '⚡'},
     }
     
     for key, config in configs.items():
@@ -96,15 +123,15 @@ def get_status_config(status):
 
 def get_speed_indicator(speed_mb):
     """Get visual speed indicator based on speed - Optimized"""
-    if speed_mb < 1:
+    if speed_mb < 0.5:
         return "🐌"
-    elif speed_mb < 5:
+    elif speed_mb < 2:
         return "🚶"
-    elif speed_mb < 10:
+    elif speed_mb < 5:
         return "🏃"
-    elif speed_mb < 20:
+    elif speed_mb < 15:
         return "🚗"
-    elif speed_mb < 50:
+    elif speed_mb < 40:
         return "✈️"
     else:
         return "🚀"
@@ -306,8 +333,8 @@ def create_progress_bar(percentage, length=20):
     if filled == length:
         return "█" * length
     elif filled > 0:
-        empty = length - filled
-        return "█" * filled + "▒" * empty
+        empty = length - filled - 1
+        return "█" * filled + "▓" + "░" * empty
     else:
         return "░" * length
 
@@ -394,8 +421,6 @@ def format_speed(bytes_per_second):
     speed_gb = speed_mb / 1024
     return f"{speed_gb:.2f} GB/s"
 
-# Additional utility functions
-
 def get_mime_type(filename):
     """Get MIME type from filename - Fast"""
     ext = get_file_extension(filename)
@@ -460,3 +485,47 @@ def cleanup_temp_files(directory, pattern="*.tmp"):
         return len(temp_files)
     except Exception:
         return 0
+
+def get_torrent_health(seeders, leechers):
+    """Determine torrent health based on seed/leech ratio"""
+    if seeders == 0:
+        return "💀 Dead"
+    elif seeders < 5:
+        return "🟥 Poor"
+    elif seeders < 20:
+        return "🟨 Fair"
+    elif seeders < 50:
+        return "🟩 Good"
+    else:
+        return "🚀 Excellent"
+
+def format_torrent_status(status_obj):
+    """Format libtorrent status object for display"""
+    try:
+        state_str = ['queued', 'checking', 'downloading metadata',
+                     'downloading', 'finished', 'seeding',
+                     'allocating', 'checking fastresume']
+        
+        state = status_obj.state
+        if state < len(state_str):
+            return state_str[state]
+        return 'unknown'
+    except Exception:
+        return 'unknown'
+
+def get_error_emoji(error_message):
+    """Get appropriate emoji for error message"""
+    error_lower = error_message.lower()
+    
+    if 'timeout' in error_lower or 'time out' in error_lower:
+        return '⏱️'
+    elif 'network' in error_lower or 'connection' in error_lower:
+        return '🌐'
+    elif 'permission' in error_lower or 'denied' in error_lower:
+        return '🔒'
+    elif 'space' in error_lower or 'disk' in error_lower:
+        return '💾'
+    elif 'size' in error_lower or 'limit' in error_lower:
+        return '📏'
+    else:
+        return '❌'
