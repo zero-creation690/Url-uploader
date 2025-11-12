@@ -1,4 +1,4 @@
-Import os
+import os
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
@@ -216,17 +216,22 @@ async def status_callback(client, callback: CallbackQuery):
     user_data = await db.get_user(user_id)
     
     if user_data:
-        text = f"""📊 **ʏᴏᴜʀ sᴛᴀᴛɪsᴛɪᴄs**
+        text = f"""📊 **Your Statistics**
 
-👤 **ᴜsᴇʀ ɪɴғᴏ:**
-• ɪᴅ: `{user_id}`
-• ᴜsᴇʀɴᴀᴍᴇ: @{user_data.get('username', 'N/A')}
-• ɴᴀᴍᴇ: {user_data.get('first_name', 'N/A')}
+👤 **User Info:**
+• ID: `{user_id}`
+• Username: @{user_data.get('username', 'N/A')}
+• Name: {user_data.get('first_name', 'N/A')}
 
-📈 **ᴜsᴀɢᴇ sᴛᴀᴛs:**
-• ᴛᴏᴛᴀʟ ᴅᴏᴡɴʟᴏᴀᴅs: {user_data.get('total_downloads', 0)}
-• ᴛᴏᴛᴀʟ ᴜᴘʟᴏᴀᴅs: {user_data.get('total_uploads', 0)}
-• ᴍᴇᴍʙᴇʀ sɪɴᴄᴇ: {user_data.get('joined_date').strftime('%Y-%m-%d')}"""
+📈 **Usage Stats:**
+• Total Downloads: {user_data.get('total_downloads', 0)}
+• Total Uploads: {user_data.get('total_uploads', 0)}
+• Member since: {user_data.get('joined_date').strftime('%Y-%m-%d')}
+
+⚡ **Bot Info:**
+• Speed: 500 MB/s
+• Max size: 4 GB
+• Status: ✅ Online"""
     else:
         text = "No data found. Start using the bot!"
     
@@ -242,17 +247,22 @@ async def status_command(client, message: Message):
     user_data = await db.get_user(user_id)
     
     if user_data:
-        text = f"""📊 **ʏᴏᴜʀ sᴛᴀᴛɪsᴛɪᴄs**
+        text = f"""📊 **Your Statistics**
 
-👤 **ᴜsᴇʀ ɪɴғᴏ:**
-• ɪᴅ: `{user_id}`
-• ᴜsᴇʀɴᴀᴍᴇ: @{user_data.get('username', 'N/A')}
-• ɴᴀᴍᴇ: {user_data.get('first_name', 'N/A')}
+👤 **User Info:**
+• ID: `{user_id}`
+• Username: @{user_data.get('username', 'N/A')}
+• Name: {user_data.get('first_name', 'N/A')}
 
-📈 **ᴜsᴀɢᴇ sᴛᴀᴛs:**
-• ᴛᴏᴛᴀʟ ᴅᴏᴡɴʟᴏᴀᴅs: {user_data.get('total_downloads', 0)}
-• ᴛᴏᴛᴀʟ ᴜᴘʟᴏᴀᴅs: {user_data.get('total_uploads', 0)}
-• ᴍᴇᴍʙᴇʀ sɪɴᴄᴇ: {user_data.get('joined_date').strftime('%Y-%m-%d')}"""
+📈 **Usage Stats:**
+• Total Downloads: {user_data.get('total_downloads', 0)}
+• Total Uploads: {user_data.get('total_uploads', 0)}
+• Member since: {user_data.get('joined_date').strftime('%Y-%m-%d')}
+
+⚡ **Bot Info:**
+• Speed: 500 MB/s
+• Max size: 4 GB
+• Status: ✅ Online"""
     else:
         text = "No data found!"
     
@@ -307,7 +317,7 @@ async def handle_upload_type(client, callback: CallbackQuery):
             f"📁 **{filename}**\n\n"
             f"💾 **Size:** {humanbytes(filesize)}\n"
             f"⚡ **Speed:** 500 MB/s\n\n"
-            f"**Uploaded by:** {Config.BOTUSERNAME}"
+            f"**Uploaded by:** {Config.DEVELOPER}"
         )
         
         # Progress tracker
