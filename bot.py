@@ -108,7 +108,10 @@ async def help_callback(client, callback: CallbackQuery):
         [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
     ])
     
-    await callback.message.edit_caption(caption=text, reply_markup=keyboard)
+    try:
+        await callback.message.edit_caption(caption=text, reply_markup=keyboard)
+    except:
+        await callback.message.edit_text(text, reply_markup=keyboard)
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message: Message):
@@ -136,7 +139,10 @@ async def about_callback(client, callback: CallbackQuery):
         [InlineKeyboardButton("🔙 Back", callback_data="back_start")]
     ])
     
-    await callback.message.edit_caption(caption=text, reply_markup=keyboard)
+    try:
+        await callback.message.edit_caption(caption=text, reply_markup=keyboard)
+    except:
+        await callback.message.edit_text(text, reply_markup=keyboard)
 
 @app.on_message(filters.command("about") & filters.private)
 async def about_command(client, message: Message):
@@ -157,222 +163,6 @@ async def about_command(client, message: Message):
 async def settings_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
     settings = user_settings.get(user_id, {})
-    
-    thumbnail = settings.get('thumbnail')
-    
-    if thumbnail and os.path.exists(thumbnail):
-        try:
-            os.remove(thumbnail)
-            user_settings[user_id]['thumbnail'] = None
-            await callback.message.edit_caption(
-                caption="✅ **Thumbnail deleted successfully!**"
-            )
-            await callback.answer("Thumbnail deleted!", show_alert=True)
-        except Exception as e:
-            await callback.answer(f"Error: {str(e)}", show_alert=True)
-    else:
-        await callback.answer("No thumbnail to delete!", show_alert=True)
-
-# Total stats command (owner only)
-@app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
-async def total_command(client, message: Message):
-    stats = await db.get_stats()
-    
-    text = f"""📈 **Bot Statistics**
-
-👥 **Users:**
-• Total Users: {stats['total_users']}
-
-📊 **Activity:**
-• Total Downloads: {stats['total_downloads']}
-• Total Uploads: {stats['total_uploads']}
-
-⚙️ **Bot Info:**
-• Speed: Up to 500 MB/s
-• Max Size: 4 GB
-• Cooldown: {COOLDOWN_TIME} seconds ({format_time(COOLDOWN_TIME)})
-• Status: ✅ Online
-
-**Developer:** {Config.DEVELOPER}
-**Updates:** {Config.UPDATE_CHANNEL}"""
-    
-    await message.reply_text(text)
-
-# Broadcast (owner only)
-@app.on_message(filters.command("broadcast") & filters.user(Config.OWNER_ID))
-async def broadcast_command(client, message: Message):
-    if not message.reply_to_message:
-        await message.reply_text("❌ **Reply to a message to broadcast!**")
-        return
-    
-    users = await db.get_all_users()
-    broadcast_msg = message.reply_to_message
-    
-    success = 0
-    failed = 0
-    blocked = 0
-    deleted = 0
-    
-    status_msg = await message.reply_text("📢 **Broadcasting...**\n\nStarting...")
-    
-    for idx, user in enumerate(users):
-        try:
-            await broadcast_msg.copy(user['user_id'])
-            success += 1
-        except Exception as e:
-            failed += 1
-            error_str = str(e).lower()
-            if 'blocked' in error_str:
-                blocked += 1
-            elif 'deleted' in error_str or 'deactivated' in error_str:
-                deleted += 1
-        
-        # Update status every 50 users
-        if (idx + 1) % 50 == 0:
-            try:
-                await status_msg.edit_text(
-                    f"📢 **Broadcasting...**\n\n"
-                    f"✅ Success: {success}\n"
-                    f"❌ Failed: {failed}\n"
-                    f"🚫 Blocked: {blocked}\n"
-                    f"👻 Deleted: {deleted}\n"
-                    f"📊 Progress: {idx + 1}/{len(users)}"
-                )
-            except:
-                pass
-        
-        await asyncio.sleep(0.05)  # Rate limiting
-    
-    await status_msg.edit_text(
-        f"✅ **Broadcast Complete!**\n\n"
-        f"✅ **Success:** {success}\n"
-        f"❌ **Failed:** {failed}\n"
-        f"🚫 **Blocked:** {blocked}\n"
-        f"👻 **Deleted:** {deleted}\n"
-        f"📊 **Total:** {len(users)}"
-    )
-
-# Cancel command - Cancel current task
-@app.on_message(filters.command("cancel") & filters.private)
-async def cancel_command(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id in user_tasks:
-        task = user_tasks[user_id]
-        filepath = task.get('filepath')
-        
-        # Clean up file
-        if filepath:
-            downloader.cleanup(filepath)
-        
-        # Remove task
-        del user_tasks[user_id]
-        
-        await message.reply_text(
-            "✅ **Task cancelled successfully!**\n\n"
-            "You can send a new URL/magnet link."
-        )
-    else:
-        await message.reply_text(
-            "❌ **No active task to cancel!**\n\n"
-            "Send a URL or magnet link to start downloading."
-        )
-
-# Ping command - Check bot status
-@app.on_message(filters.command("ping") & filters.private)
-async def ping_command(client, message: Message):
-    start = time.time()
-    reply = await message.reply_text("🏓 **Pinging...**")
-    end = time.time()
-    
-    ms = (end - start) * 1000
-    
-    await reply.edit_text(
-        f"🏓 **Pong!**\n\n"
-        f"⚡ **Response Time:** `{ms:.2f}ms`\n"
-        f"✅ **Status:** Online"
-    )
-
-# Error handler for the bot
-@app.on_message(filters.private)
-async def catch_all(client, message: Message):
-    """Catch-all handler for unhandled messages"""
-    # Ignore if already handled
-    if message.text and message.text.startswith('/'):
-        await message.reply_text(
-            "❓ **Unknown command!**\n\n"
-            "Use /help to see available commands."
-        )
-
-# Startup message
-async def startup():
-    """Send startup notification"""
-    try:
-        await app.send_message(
-            Config.OWNER_ID,
-            "🚀 **Bot Started Successfully!**\n\n"
-            f"⚡ Speed: Up to 500 MB/s\n"
-            f"💾 Max Size: 4 GB\n"
-            f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}\n"
-            f"✅ Status: Online"
-        )
-    except Exception as e:
-        print(f"Startup notification failed: {e}")
-
-# Shutdown handler
-async def shutdown():
-    """Cleanup on shutdown"""
-    print("🛑 Bot shutting down...")
-    
-    # Cleanup all active downloads
-    for user_id, task in list(user_tasks.items()):
-        filepath = task.get('filepath')
-        if filepath:
-            downloader.cleanup(filepath)
-    
-    user_tasks.clear()
-    
-    try:
-        await app.send_message(
-            Config.OWNER_ID,
-            "🛑 **Bot Stopped!**\n\n"
-            "The bot has been shut down."
-        )
-    except:
-        pass
-    
-    print("✅ Cleanup complete!")
-
-# Run bot
-if __name__ == "__main__":
-    print("=" * 60)
-    print("🚀 URL Uploader Bot Starting...")
-    print(f"👨‍💻 Developer: {Config.DEVELOPER}")
-    print(f"📢 Updates: {Config.UPDATE_CHANNEL}")
-    print(f"⚡ Speed: Up to 500 MB/s")
-    print(f"💾 Max Size: 4 GB")
-    print(f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}")
-    print(f"🤖 Bot: @{app.me.username if hasattr(app, 'me') else 'Loading...'}")
-    print("=" * 60)
-    
-    try:
-        # Send startup notification
-        app.start()
-        asyncio.get_event_loop().run_until_complete(startup())
-        
-        # Keep bot running
-        from pyrogram import idle
-        idle()
-        
-    except KeyboardInterrupt:
-        print("\n⚠️ Keyboard interrupt received!")
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
-    finally:
-        # Cleanup on exit
-        asyncio.get_event_loop().run_until_complete(shutdown())
-        app.stop()
-        print("👋 Bot stopped successfully!")
     
     text = """⚙️ **Bot Settings**
 
@@ -486,7 +276,7 @@ async def status_command(client, message: Message):
     
     await message.reply_text(text)
 
-# Back to start
+# Back to start - FIXED
 @app.on_callback_query(filters.regex("^back_start$"))
 async def back_start(client, callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -504,7 +294,16 @@ async def back_start(client, callback: CallbackQuery):
         [InlineKeyboardButton("📢 Updates Channel", url=Config.UPDATE_CHANNEL)]
     ])
     
-    await callback.message.edit_caption(caption=text, reply_markup=keyboard)
+    # Try to edit caption first, fallback to text
+    try:
+        await callback.message.edit_caption(caption=text, reply_markup=keyboard)
+    except Exception:
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard)
+        except Exception as e:
+            print(f"Error in back_start: {e}")
+            # If both fail, just answer the callback
+            await callback.answer("Error going back. Use /start", show_alert=True)
 
 # Handle file upload type selection
 @app.on_callback_query(filters.regex("^upload_"))
@@ -748,7 +547,7 @@ async def handle_rename_callback(client, callback: CallbackQuery):
         await callback.answer()
 
 # Handle text input (URL or rename)
-@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast"]))
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast", "cancel", "ping"]))
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
     
@@ -1005,3 +804,220 @@ async def showthumb_command(client, message: Message):
 async def delete_thumb_callback(client, callback: CallbackQuery):
     user_id = callback.from_user.id
     settings = user_settings.get(user_id, {})
+    
+    thumbnail = settings.get('thumbnail')
+    
+    if thumbnail and os.path.exists(thumbnail):
+        try:
+            os.remove(thumbnail)
+            user_settings[user_id]['thumbnail'] = None
+            await callback.message.edit_caption(
+                caption="✅ **Thumbnail deleted successfully!**"
+            )
+            await callback.answer("Thumbnail deleted!", show_alert=True)
+        except Exception as e:
+            await callback.answer(f"Error: {str(e)}", show_alert=True)
+    else:
+        await callback.answer("No thumbnail to delete!", show_alert=True)
+
+# Total stats command (owner only)
+@app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
+async def total_command(client, message: Message):
+    stats = await db.get_stats()
+    
+    text = f"""📈 **Bot Statistics**
+
+👥 **Users:**
+• Total Users: {stats['total_users']}
+
+📊 **Activity:**
+• Total Downloads: {stats['total_downloads']}
+• Total Uploads: {stats['total_uploads']}
+
+⚙️ **Bot Info:**
+• Speed: Up to 500 MB/s
+• Max Size: 4 GB
+• Cooldown: {COOLDOWN_TIME} seconds ({format_time(COOLDOWN_TIME)})
+• Status: ✅ Online
+
+**Developer:** {Config.DEVELOPER}
+**Updates:** {Config.UPDATE_CHANNEL}"""
+    
+    await message.reply_text(text)
+
+# Broadcast (owner only)
+@app.on_message(filters.command("broadcast") & filters.user(Config.OWNER_ID))
+async def broadcast_command(client, message: Message):
+    if not message.reply_to_message:
+        await message.reply_text("❌ **Reply to a message to broadcast!**")
+        return
+    
+    users = await db.get_all_users()
+    broadcast_msg = message.reply_to_message
+    
+    success = 0
+    failed = 0
+    blocked = 0
+    deleted = 0
+    
+    status_msg = await message.reply_text("📢 **Broadcasting...**\n\nStarting...")
+    
+    for idx, user in enumerate(users):
+        try:
+            await broadcast_msg.copy(user['user_id'])
+            success += 1
+        except Exception as e:
+            failed += 1
+            error_str = str(e).lower()
+            if 'blocked' in error_str:
+                blocked += 1
+            elif 'deleted' in error_str or 'deactivated' in error_str:
+                deleted += 1
+        
+        # Update status every 50 users
+        if (idx + 1) % 50 == 0:
+            try:
+                await status_msg.edit_text(
+                    f"📢 **Broadcasting...**\n\n"
+                    f"✅ Success: {success}\n"
+                    f"❌ Failed: {failed}\n"
+                    f"🚫 Blocked: {blocked}\n"
+                    f"👻 Deleted: {deleted}\n"
+                    f"📊 Progress: {idx + 1}/{len(users)}"
+                )
+            except:
+                pass
+        
+        await asyncio.sleep(0.05)  # Rate limiting
+    
+    await status_msg.edit_text(
+        f"✅ **Broadcast Complete!**\n\n"
+        f"✅ **Success:** {success}\n"
+        f"❌ **Failed:** {failed}\n"
+        f"🚫 **Blocked:** {blocked}\n"
+        f"👻 **Deleted:** {deleted}\n"
+        f"📊 **Total:** {len(users)}"
+    )
+
+# Cancel command - Cancel current task
+@app.on_message(filters.command("cancel") & filters.private)
+async def cancel_command(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id in user_tasks:
+        task = user_tasks[user_id]
+        filepath = task.get('filepath')
+        
+        # Clean up file
+        if filepath:
+            downloader.cleanup(filepath)
+        
+        # Remove task
+        del user_tasks[user_id]
+        
+        await message.reply_text(
+            "✅ **Task cancelled successfully!**\n\n"
+            "You can send a new URL/magnet link."
+        )
+    else:
+        await message.reply_text(
+            "❌ **No active task to cancel!**\n\n"
+            "Send a URL or magnet link to start downloading."
+        )
+
+# Ping command - Check bot status
+@app.on_message(filters.command("ping") & filters.private)
+async def ping_command(client, message: Message):
+    start = time.time()
+    reply = await message.reply_text("🏓 **Pinging...**")
+    end = time.time()
+    
+    ms = (end - start) * 1000
+    
+    await reply.edit_text(
+        f"🏓 **Pong!**\n\n"
+        f"⚡ **Response Time:** `{ms:.2f}ms`\n"
+        f"✅ **Status:** Online"
+    )
+
+# Error handler for unknown commands
+@app.on_message(filters.command(["unknown"]) & filters.private)
+async def unknown_command(client, message: Message):
+    await message.reply_text(
+        "❓ **Unknown command!**\n\n"
+        "Use /help to see available commands."
+    )
+
+# Startup message
+async def startup():
+    """Send startup notification"""
+    try:
+        await app.send_message(
+            Config.OWNER_ID,
+            "🚀 **Bot Started Successfully!**\n\n"
+            f"⚡ Speed: Up to 500 MB/s\n"
+            f"💾 Max Size: 4 GB\n"
+            f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}\n"
+            f"✅ Status: Online"
+        )
+    except Exception as e:
+        print(f"Startup notification failed: {e}")
+
+# Shutdown handler
+async def shutdown():
+    """Cleanup on shutdown"""
+    print("🛑 Bot shutting down...")
+    
+    # Cleanup all active downloads
+    for user_id, task in list(user_tasks.items()):
+        filepath = task.get('filepath')
+        if filepath:
+            downloader.cleanup(filepath)
+    
+    user_tasks.clear()
+    
+    try:
+        await app.send_message(
+            Config.OWNER_ID,
+            "🛑 **Bot Stopped!**\n\n"
+            "The bot has been shut down."
+        )
+    except:
+        pass
+    
+    print("✅ Cleanup complete!")
+
+# Run bot
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🚀 URL Uploader Bot Starting...")
+    print(f"👨‍💻 Developer: {Config.DEVELOPER}")
+    print(f"📢 Updates: {Config.UPDATE_CHANNEL}")
+    print(f"⚡ Speed: Up to 500 MB/s")
+    print(f"💾 Max Size: 4 GB")
+    print(f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}")
+    print("=" * 60)
+    
+    try:
+        # Start bot
+        app.start()
+        print(f"✅ Bot started as @{app.me.username}")
+        
+        # Send startup notification
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(startup())
+        
+        # Keep bot running
+        from pyrogram import idle
+        idle()
+        
+    except KeyboardInterrupt:
+        print("\n⚠️ Keyboard interrupt received!")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+    finally:
+        # Cleanup on exit
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(shutdown())
+        app.stop()
+        print("👋 Bot stopped successfully!")
