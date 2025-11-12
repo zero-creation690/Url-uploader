@@ -307,7 +307,7 @@ async def handle_upload_type(client, callback: CallbackQuery):
             f"📁 **{filename}**\n\n"
             f"💾 **Size:** {humanbytes(filesize)}\n"
             f"⚡ **Speed:** 500 MB/s\n\n"
-            f"**Uploaded by:** {Config.DEVELOPER}"
+            f"**Uploaded by:** {Config.BOTUSERNAME}"
         )
         
         # Progress tracker
