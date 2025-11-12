@@ -25,6 +25,7 @@ class Config:
     # Update channel
     UPDATE_CHANNEL = os.environ.get("UPDATE_CHANNEL", "https://t.me/zerodevbro")
     DEVELOPER = "@Zeroboy216"
+    BOTUSERNAME = "@Urluploader_z_bot"
     
     # Download/Upload settings
     MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
