@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
@@ -88,7 +89,7 @@ async def add_reaction(message: Message):
         # print(f"Reaction failed: {e}")
         pass
 
-# Start command - Auto-filter style with image
+# Start command - Auto-filter style with image (REPLY TO USER MESSAGE)
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     user_id = message.from_user.id
@@ -112,16 +113,79 @@ async def start_command(client, message: Message):
         [InlineKeyboardButton("📢 Updates Channel", url=Config.UPDATE_CHANNEL)]
     ])
     
-    # Send with photo
+    # Send with photo AS REPLY to user's message
     try:
         await message.reply_photo(
             photo=WELCOME_IMAGE,
             caption=text,
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            quote=True  # This makes it a reply with highlight
         )
     except:
         # Fallback if image fails
-        await message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True)
+        await message.reply_text(
+            text, 
+            reply_markup=keyboard, 
+            disable_web_page_preview=True,
+            quote=True  # This makes it a reply with highlight
+        )
+
+# Restart command (OWNER ONLY) - Restarts bot and broadcasts notification
+@app.on_message(filters.command("restart") & filters.user(Config.OWNER_ID))
+async def restart_command(client, message: Message):
+    await add_reaction(message)
+    
+    restart_msg = await message.reply_text("🔄 **Restarting bot...**\n\nPlease wait...")
+    
+    try:
+        # Get all users for broadcast
+        users = await db.get_all_users()
+        
+        broadcast_text = "⚡ **URL Uploader Bot is restarted...**\n\nBot is now back online!"
+        
+        success = 0
+        failed = 0
+        
+        # Broadcast to all users
+        for user in users:
+            try:
+                await client.send_message(
+                    chat_id=user['user_id'],
+                    text=broadcast_text
+                )
+                success += 1
+                await asyncio.sleep(0.05)  # Rate limiting
+            except:
+                failed += 1
+        
+        # Send restart summary to owner
+        await restart_msg.edit_text(
+            f"✅ **Broadcast Complete!**\n\n"
+            f"✅ Sent: {success}\n"
+            f"❌ Failed: {failed}\n\n"
+            f"🔄 **Restarting now...**"
+        )
+        
+        await asyncio.sleep(2)
+        
+        # Cleanup before restart
+        for user_id, task in list(user_tasks.items()):
+            filepath = task.get('filepath')
+            if filepath:
+                downloader.cleanup(filepath)
+        user_tasks.clear()
+        
+        # Stop bot gracefully
+        await app.stop()
+        
+        # Restart the script
+        os.execl(sys.executable, sys.executable, *sys.argv)
+        
+    except Exception as e:
+        await restart_msg.edit_text(
+            f"❌ **Restart Failed!**\n\n"
+            f"**Error:** {str(e)}"
+        )
 
 # Help command
 @app.on_callback_query(filters.regex("^help$"))
@@ -581,7 +645,7 @@ async def handle_rename_callback(client, callback: CallbackQuery):
         await callback.answer()
 
 # Handle text input (URL or rename)
-@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast", "cancel", "ping"]))
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about", "status", "settings", "setname", "setcaption", "clearsettings", "showthumb", "total", "broadcast", "cancel", "ping", "restart"]))
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
     
