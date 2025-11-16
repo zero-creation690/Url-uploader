@@ -29,8 +29,13 @@ user_cooldowns = {}
 # Cooldown settings
 COOLDOWN_TIME = 159  # 2 minutes 39 seconds
 
-# Random emojis for reactions
-REACTION_EMOJIS = ["❤️", "🥰", "🔥", "💋", "😍", "😘", "☺️", "👍", "🎉", "👏", "⚡", "✨", "💯", "🚀"]
+# Random emojis for reactions (expanded list)
+REACTION_EMOJIS = [
+    "❤️", "🥰", "🔥", "💋", "😍", "😘", "☺️", 
+    "👍", "🎉", "👏", "⚡", "✨", "💯", "🚀",
+    "😂", "🤗", "😎", "🤩", "💪", "🙌", "💖",
+    "🌟", "😊", "💝", "🎊", "🥳", "😁", "💕"
+]
 
 # Welcome image URL
 WELCOME_IMAGE = "https://ar-hosting.pages.dev/1762658234858.jpg"
@@ -57,15 +62,33 @@ def get_remaining_time(user_id):
     
     return int(remaining)
 
-async def add_random_reaction(message: Message):
-    """Add a random reaction to a message"""
+async def add_reaction(message: Message):
+    """
+    Attempt to add a random reaction to a message.
+    NOTE: This will NOT work for bot accounts, only for userbots.
+    The function is included for compatibility if you convert to userbot later.
+    """
+    # Skip if media_group_id exists (albums/grouped media)
+    if message.media_group_id:
+        return
+    
     try:
+        message_id = message.id
+        chat_id = message.chat.id
+        
+        # Select random emoji from list
         random_emoji = random.choice(REACTION_EMOJIS)
-        await message.react(random_emoji)
+        
+        # Attempt to react (will fail for bots)
+        await message.react(emoji=random_emoji, big=True)
+        
     except Exception as e:
-        print(f"Reaction failed: {e}")
+        # Silently fail - reactions don't work for bots
+        # Uncomment below to see errors in logs
+        # print(f"Reaction failed: {e}")
+        pass
 
-# Start command - Auto-filter style with random reaction and image
+# Start command - Auto-filter style with image
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     user_id = message.from_user.id
@@ -74,8 +97,8 @@ async def start_command(client, message: Message):
     
     await db.add_user(user_id, username, first_name)
     
-    # Add random reaction to /start message
-    await add_random_reaction(message)
+    # Try to add reaction
+    await add_reaction(message)
     
     text = Config.START_MESSAGE.format(
         name=first_name,
@@ -119,8 +142,7 @@ async def help_callback(client, callback: CallbackQuery):
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message: Message):
-    # Add reaction to help command
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     text = Config.HELP_MESSAGE.format(
         dev=Config.DEVELOPER,
@@ -153,8 +175,7 @@ async def about_callback(client, callback: CallbackQuery):
 
 @app.on_message(filters.command("about") & filters.private)
 async def about_command(client, message: Message):
-    # Add reaction to about command
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     text = Config.ABOUT_MESSAGE.format(
         dev=Config.DEVELOPER,
@@ -200,8 +221,7 @@ async def settings_callback(client, callback: CallbackQuery):
 
 @app.on_message(filters.command("settings") & filters.private)
 async def settings_command(client, message: Message):
-    # Add reaction to settings command
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     settings = user_settings.get(user_id, {})
@@ -264,8 +284,7 @@ async def status_callback(client, callback: CallbackQuery):
 
 @app.on_message(filters.command("status") & filters.private)
 async def status_command(client, message: Message):
-    # Add reaction to status command
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     user_data = await db.get_user(user_id)
@@ -292,7 +311,7 @@ async def status_command(client, message: Message):
     
     await message.reply_text(text)
 
-# Back to start - FIXED
+# Back to start
 @app.on_callback_query(filters.regex("^back_start$"))
 async def back_start(client, callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -318,7 +337,6 @@ async def back_start(client, callback: CallbackQuery):
             await callback.message.edit_text(text, reply_markup=keyboard)
         except Exception as e:
             print(f"Error in back_start: {e}")
-            # If both fail, just answer the callback
             await callback.answer("Error going back. Use /start", show_alert=True)
 
 # Handle file upload type selection
@@ -567,12 +585,8 @@ async def handle_rename_callback(client, callback: CallbackQuery):
 async def handle_text_input(client, message: Message):
     user_id = message.from_user.id
     
-    # Check if message is part of media group (skip reaction for media groups)
-    if message.media_group_id:
-        return
-    
-    # Add reaction to user message
-    await add_random_reaction(message)
+    # Try to add reaction
+    await add_reaction(message)
     
     # Check if waiting for rename
     if user_id in user_tasks and user_tasks[user_id].get('waiting_rename'):
@@ -626,13 +640,13 @@ async def handle_text_input(client, message: Message):
     # Process as download
     await process_download(client, message, url)
 
-# Handle torrent files
+# Handle torrent files and any documents
 @app.on_message(filters.document & filters.private)
 async def handle_document(client, message: Message):
     user_id = message.from_user.id
     
-    # Add reaction to document message
-    await add_random_reaction(message)
+    # Try to add reaction
+    await add_reaction(message)
     
     # Check cooldown
     remaining = get_remaining_time(user_id)
@@ -653,6 +667,114 @@ async def handle_document(client, message: Message):
             await process_download(client, message, torrent_path)
         except Exception as e:
             await status_msg.edit_text(f"❌ **Error downloading torrent:** {str(e)}")
+    else:
+        # Handle regular file upload
+        await handle_direct_file_upload(client, message)
+
+# Handle any video files sent directly
+@app.on_message(filters.video & filters.private)
+async def handle_video(client, message: Message):
+    user_id = message.from_user.id
+    
+    # Try to add reaction
+    await add_reaction(message)
+    
+    # Check cooldown
+    remaining = get_remaining_time(user_id)
+    if remaining > 0:
+        time_str = format_time(remaining)
+        await message.reply_text(
+            f"⏳ **Please wait!**\n\n"
+            f"You can send new task after **{time_str}**"
+        )
+        return
+    
+    await handle_direct_file_upload(client, message)
+
+# Handle any audio files sent directly
+@app.on_message(filters.audio & filters.private)
+async def handle_audio(client, message: Message):
+    user_id = message.from_user.id
+    
+    # Try to add reaction
+    await add_reaction(message)
+    
+    # Check cooldown
+    remaining = get_remaining_time(user_id)
+    if remaining > 0:
+        time_str = format_time(remaining)
+        await message.reply_text(
+            f"⏳ **Please wait!**\n\n"
+            f"You can send new task after **{time_str}**"
+        )
+        return
+    
+    await handle_direct_file_upload(client, message)
+
+# Handle direct file uploads (not downloads)
+async def handle_direct_file_upload(client, message: Message):
+    """Handle files sent directly to the bot"""
+    user_id = message.from_user.id
+    
+    await db.add_user(user_id, message.from_user.username, message.from_user.first_name)
+    
+    status_msg = await message.reply_text("📥 **Downloading file from Telegram...**")
+    
+    try:
+        # Download the file
+        filepath = await message.download(file_name=f"{Config.DOWNLOAD_DIR}/{message.document.file_name if message.document else message.video.file_name if message.video else message.audio.file_name if message.audio else f'file_{user_id}_{int(time.time())}'}")
+        
+        await status_msg.delete()
+        
+        # Get file info
+        filename = os.path.basename(filepath)
+        filesize = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
+        
+        # Store task for rename
+        user_tasks[user_id] = {
+            'filepath': filepath,
+            'url': 'direct_upload',
+            'waiting_rename': False,
+            'is_direct_upload': True
+        }
+        
+        # Ask if user wants to rename
+        text = (
+            f"✅ **File Received!**\n\n"
+            f"📁 **File:** `{filename}`\n"
+            f"💾 **Size:** {humanbytes(filesize)}\n\n"
+            f"Do you want to rename this file before re-uploading?"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Rename Now", callback_data="rename_now")],
+            [InlineKeyboardButton("⏭️ Skip Rename", callback_data="rename_skip")]
+        ])
+        
+        await message.reply_text(text, reply_markup=keyboard)
+        
+        await db.update_stats(user_id, download=True)
+        await db.log_action(user_id, "direct_upload", filename)
+        
+        # Log to channel
+        try:
+            await client.send_message(
+                Config.LOG_CHANNEL,
+                f"📤 **Direct File Upload**\n\n"
+                f"👤 User: {message.from_user.mention}\n"
+                f"📁 File: `{filename}`\n"
+                f"💾 Size: {humanbytes(filesize)}\n"
+                f"📊 Type: Direct Upload"
+            )
+        except:
+            pass
+        
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ **Error:** {str(e)[:300]}\n\n"
+            f"Failed to process your file."
+        )
+        await db.log_action(user_id, "error", str(e))
 
 # Download processing function
 async def process_download(client, message: Message, url):
@@ -734,7 +856,7 @@ async def process_download(client, message: Message, url):
 # Settings commands
 @app.on_message(filters.command("setname") & filters.private)
 async def setname_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     if len(message.command) < 2:
@@ -753,7 +875,7 @@ async def setname_command(client, message: Message):
 
 @app.on_message(filters.command("setcaption") & filters.private)
 async def setcaption_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     if len(message.command) < 2:
@@ -772,7 +894,7 @@ async def setcaption_command(client, message: Message):
 
 @app.on_message(filters.command("clearsettings") & filters.private)
 async def clearsettings_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     if user_id in user_settings:
@@ -782,7 +904,7 @@ async def clearsettings_command(client, message: Message):
 # Thumbnail handler
 @app.on_message(filters.photo & filters.private)
 async def handle_thumbnail(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     
@@ -812,7 +934,7 @@ async def handle_thumbnail(client, message: Message):
 # Show thumbnail command
 @app.on_message(filters.command("showthumb") & filters.private)
 async def showthumb_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     settings = user_settings.get(user_id, {})
@@ -859,7 +981,7 @@ async def delete_thumb_callback(client, callback: CallbackQuery):
 # Total stats command (owner only)
 @app.on_message(filters.command("total") & filters.user(Config.OWNER_ID))
 async def total_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     stats = await db.get_stats()
     
@@ -886,7 +1008,7 @@ async def total_command(client, message: Message):
 # Broadcast (owner only)
 @app.on_message(filters.command("broadcast") & filters.user(Config.OWNER_ID))
 async def broadcast_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     if not message.reply_to_message:
         await message.reply_text("❌ **Reply to a message to broadcast!**")
@@ -942,7 +1064,7 @@ async def broadcast_command(client, message: Message):
 # Cancel command - Cancel current task
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     user_id = message.from_user.id
     
@@ -970,7 +1092,7 @@ async def cancel_command(client, message: Message):
 # Ping command - Check bot status
 @app.on_message(filters.command("ping") & filters.private)
 async def ping_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     start = time.time()
     reply = await message.reply_text("🏓 **Pinging...**")
@@ -987,7 +1109,7 @@ async def ping_command(client, message: Message):
 # Error handler for unknown commands
 @app.on_message(filters.command(["unknown"]) & filters.private)
 async def unknown_command(client, message: Message):
-    await add_random_reaction(message)
+    await add_reaction(message)
     
     await message.reply_text(
         "❓ **Unknown command!**\n\n"
@@ -1004,7 +1126,8 @@ async def startup():
             f"⚡ Speed: Up to 500 MB/s\n"
             f"💾 Max Size: 4 GB\n"
             f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}\n"
-            f"✅ Status: Online"
+            f"✅ Status: Online\n\n"
+            f"⚠️ **Note:** Reactions are enabled but will only work if converted to userbot."
         )
     except Exception as e:
         print(f"Startup notification failed: {e}")
@@ -1042,6 +1165,8 @@ if __name__ == "__main__":
     print(f"⚡ Speed: Up to 500 MB/s")
     print(f"💾 Max Size: 4 GB")
     print(f"⏱️ Cooldown: {format_time(COOLDOWN_TIME)}")
+    print(f"😊 Reactions: Enabled (28 emojis)")
+    print("⚠️  Note: Reactions won't work for bot accounts")
     print("=" * 60)
     
     try:
